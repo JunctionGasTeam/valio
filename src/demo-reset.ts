@@ -22,8 +22,8 @@ for (const litres of [150, 200, 180, 220, 200]) {
   const p = await call('demo-agent', '/proposals', {
     site: 'Hotel Kaisla Helsinki', deliver_by: '2026-11-16', items: [{ need: 'maito', quantity: litres, unit: 'l' }], diets: ['lactose_free'],
   });
-  await call('demo-approver', `/proposals/${p.id}/decision`, { decision: 'approve', note: 'routine weekly order' });
+  await call('demo-owner', `/proposals/${p.id}/decision`, { decision: 'approve', note: 'routine weekly order' });
   console.log(`history: ${litres} l, ${p.items[0].allocation[0].id}, €${p.total_cents / 100}, approved unchanged`);
 }
-const trust = await (await app.request('/trust', { headers: { authorization: 'Bearer demo-approver' } })).json() as any;
+const trust = await (await app.request('/trust', { headers: { authorization: 'Bearer demo-owner' } })).json() as any;
 console.log('trust ladder:', trust.suggestion?.text ?? `streak ${trust.streak}, no suggestion`);

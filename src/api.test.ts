@@ -57,55 +57,63 @@ test('OpenAPI is public, everything else needs a token', async () => {
   assert.equal((await call('nope', 'GET', '/policy')).status, 401);
 });
 
-test('scene 1–4: agent proposes, cannot approve, human revises to confirmed stock, approves', async () => {
+test('scene 1–4: agent proposes only stock Valio confirms, cannot approve, human weighs the cheaper unconfirmed option, approves', async () => {
   const created = await call('demo-agent', 'POST', '/proposals', MILK);
   assert.equal(created.status, 200);
   const p = created.body;
   assert.equal(p.status, 'needs_review');
   assert.equal(p.requires_human, true);
-  assert.deepEqual(failed(p), ['agent_may_finalise', 'allow_unknown_amount', 'max_line_eur', 'max_order_eur']);
-  assert.equal(p.items[0].allocation[0].id, '464306');
+  assert.deepEqual(failed(p), ['agent_may_finalise', 'max_line_eur', 'max_order_eur']);
+  const parts = p.items[0].allocation; // sure to arrive: 384 + 51 + 565 l across three products with confirmed stock
+  assert.deepEqual(parts.map((l: any) => [l.id, l.sales_units]), [['469363', 384], ['462775', 51], ['463380', 565]]);
+  assert.ok(parts.every((l: any) => !l.flags.includes('E5') && l.flags.includes('E4')));
+  assert.equal(p.total_cents, 258064);
 
   assert.equal((await call('demo-agent', 'POST', `/proposals/${p.id}/decision`, { decision: 'approve' })).status, 403);
-  assert.equal((await call('demo-requester', 'POST', `/proposals/${p.id}/decision`, { decision: 'approve' })).status, 403);
 
-  const rev = (await call('demo-approver', 'PATCH', `/proposals/${p.id}`, { item: 0, confirmed_only: true })).body;
-  const parts = rev.items[0].allocation;
-  assert.ok(parts.length >= 2 && parts.length <= 3);
-  assert.ok(parts.every((l: any) => !l.flags.includes('E5') && l.flags.includes('E4')));
-  assert.equal(parts[0].id, '469363');
-  assert.equal(parts[0].sales_units, 384);
+  // The cheaper Eila has no confirmed stock: a person may choose it, but then it is a hard rule. Back to the agent's pick.
+  const cheap = (await call('demo-owner', 'PATCH', `/proposals/${p.id}`, { item: 0, choose: '464306' })).body;
+  assert.ok(failed(cheap).includes('confirmed_stock'));
+  assert.equal(cheap.total_cents, 101000);
+  const rev = (await call('demo-owner', 'PATCH', `/proposals/${p.id}`, { item: 0 })).body;
+  assert.deepEqual(rev.items[0].allocation.map((l: any) => l.id), parts.map((l: any) => l.id));
 
   bump = parts[0].id; // price moves before approval → back to review with the difference (§7.3)
-  const stale = await call('demo-approver', 'POST', `/proposals/${p.id}/decision`, { decision: 'approve' });
+  const stale = await call('demo-owner', 'POST', `/proposals/${p.id}/decision`, { decision: 'approve' });
   bump = null;
   assert.equal(stale.status, 409);
   assert.deepEqual(stale.body.diffs.map((d: any) => [d.id, d.what]), [[parts[0].id, 'price_cents']]);
   assert.equal(stale.body.proposal.status, 'needs_review');
 
-  const ok = await call('demo-approver', 'POST', `/proposals/${p.id}/decision`, { decision: 'approve', note: 'ok' });
+  const ok = await call('demo-owner', 'POST', `/proposals/${p.id}/decision`, { decision: 'approve', note: 'ok' });
   assert.equal(ok.status, 200);
   assert.equal(ok.body.status, 'approved');
-  assert.equal((await call('demo-approver', 'PATCH', `/proposals/${p.id}`, { item: 0, quantity: 5 })).status, 409);
+  assert.equal((await call('demo-owner', 'PATCH', `/proposals/${p.id}`, { item: 0, quantity: 5 })).status, 409);
 
-  const events = (await call('demo-requester', 'GET', `/audit?proposal=${p.id}`)).body.map((e: any) => e.event);
-  assert.deepEqual(events, ['created', 'policy_verdict', 'revised', 'policy_verdict', 'revalidation_failed', 'approved']);
+  const events = (await call('demo-owner', 'GET', `/audit?proposal=${p.id}`)).body.map((e: any) => e.event);
+  assert.deepEqual(events, ['created', 'policy_verdict', 'revised', 'policy_verdict', 'revised', 'policy_verdict', 'revalidation_failed', 'approved']);
 
   // Scene 5: export. The agent may not export what needed a human (hard rule 2); the approver may.
   assert.equal((await app.request(`/proposals/${p.id}/export`, { headers: { authorization: 'Bearer demo-agent' } })).status, 403);
-  const file = await app.request(`/proposals/${p.id}/export`, { headers: { authorization: 'Bearer demo-approver' } });
+  const file = await app.request(`/proposals/${p.id}/export`, { headers: { authorization: 'Bearer demo-owner' } });
   assert.equal(file.status, 200);
   const csv = (await file.text()).replace(/^\ufeff/, '').trim().split('\r\n').map((l) => l.split(';'));
   assert.deepEqual(csv[0], ['gtin', 'product_id', 'name', 'quantity', 'sales_unit', 'unit_price_eur', 'line_total_eur', 'delivery_date']);
   assert.deepEqual(csv.slice(1).map((r) => [r[1], r[3], r[7]]), parts.map((l: any) => [l.id, String(l.sales_units), l.date]));
   assert.ok(csv.slice(1).every((r) => /^\d{8,14}$/.test(r[0])), 'every line has a GTIN');
-  assert.equal((await call('demo-approver', 'GET', `/proposals/${p.id}`)).body.status, 'exported');
+  assert.equal((await call('demo-owner', 'GET', `/proposals/${p.id}`)).body.status, 'exported');
 });
 
-test('policy: agent may finalise within limits; an agent key can only tighten it', async () => {
-  const loose = { agent_may_finalise: true, max_order_eur: 2000, max_line_eur: 2000, allow_unknown_amount: true };
-  assert.equal((await call('demo-agent', 'PUT', '/policy', loose)).status, 403);
-  assert.equal((await call('demo-approver', 'PUT', '/policy', loose)).status, 200);
+test('policy: agent may finish routine orders within limits; an agent key can only tighten it', async () => {
+  const loose = { agent_may_finalise: true, max_order_eur: 3000, max_line_eur: 3000 };
+  assert.equal((await call('demo-agent', 'PUT', '/policy', loose)).status, 403); // only a person sets the policy
+  assert.equal((await call('demo-owner', 'PUT', '/policy', loose)).status, 200);
+  // Autonomy covers routine orders only: one approved milk order so far, three are needed.
+  for (let i = 0; i < 2; i++) {
+    const p = (await call('demo-agent', 'POST', '/proposals', MILK)).body;
+    assert.deepEqual(failed(p), ['routine_order']);
+    assert.equal((await call('demo-owner', 'POST', `/proposals/${p.id}/decision`, { decision: 'approve' })).status, 200);
+  }
   const auto = (await call('demo-agent', 'POST', '/proposals', MILK)).body;
   assert.equal(auto.status, 'auto_approved');
   assert.equal(auto.requires_human, false);
@@ -120,7 +128,7 @@ test('policy: agent may finalise within limits; an agent key can only tighten it
   db.prepare("UPDATE customers SET agents_enabled = 0 WHERE id = 'kaisla'").run(); // kill switch
   assert.equal((await call('demo-agent', 'POST', '/proposals', MILK)).status, 403);
   db.prepare("UPDATE customers SET agents_enabled = 1 WHERE id = 'kaisla'").run();
-  await call('demo-approver', 'PUT', '/policy', {});
+  await call('demo-owner', 'PUT', '/policy', {});
 });
 
 test('limits found in the source text are added even if the agent left them out', async () => {
@@ -133,8 +141,8 @@ test('limits found in the source text are added even if the agent left them out'
 });
 
 test('trust: a quantity not in the text, or far from the usual one, needs a human', async () => {
-  const loose = { agent_may_finalise: true, max_order_eur: 1e5, max_line_eur: 1e5, allow_unknown_amount: true };
-  await call('demo-approver', 'PUT', '/policy', loose);
+  const loose = { agent_may_finalise: true, max_order_eur: 1e5, max_line_eur: 1e5 };
+  await call('demo-owner', 'PUT', '/policy', loose);
   // The agent read "100" as 1000: plausible, under every limit, but not what was written.
   const typo = (await call('demo-agent', 'POST', '/proposals', { ...MILK, source_text: '100 l lactose-free milk by Monday' })).body;
   assert.equal(typo.status, 'needs_review');
@@ -150,7 +158,7 @@ test('trust: a quantity not in the text, or far from the usual one, needs a huma
   assert.equal(rule(20).ok, false);
   assert.equal(rule(300).ok, true);
   assert.equal(rule(1000, new Map([['10400|l', [200, 200]]])).ok, true); // too little history to judge
-  await call('demo-approver', 'PUT', '/policy', {});
+  await call('demo-owner', 'PUT', '/policy', {});
 });
 
 test('recipe: scaled to portions, the named Valio product preferred, every quantity traced to its line', async () => {
@@ -158,18 +166,18 @@ test('recipe: scaled to portions, the named Valio product preferred, every quant
   const line = (text: string, kg: number, need: string | null, product: string | null = null, pantry = false) => ({ text, kg, need, product, pantry });
   writeFileSync(path, JSON.stringify([
     { id: 'r1', name: 'Maitokeitto', url: 'https://example.invalid/r1', image: null, yield: 10, course: 'Soup', diets: [], lines: [
-      line('2,000 kg Valio Eila maitoa', 2, 'maito', '464306'), line('0,500 kg vettä', 0.5, null), line('0,010 kg suolaa', 0.01, 'suola', null, true)] },
+      line('2,000 kg Arla maitoa', 2, 'maito', '462775'), line('0,500 kg vettä', 0.5, null), line('0,010 kg suolaa', 0.01, 'suola', null, true)] },
     { id: 'r2', name: 'Toinen', url: 'https://example.invalid/r2', image: null, yield: 10, course: 'Soup', diets: [], lines: [
       line('2,000 kg Valio maitoa', 2, 'maito', '464440')] },
   ]));
   process.env.RECIPES_PATH = path;
   try {
-    assert.deepEqual((await call('demo-requester', 'GET', '/recipes')).body.map((r: any) => [r.id, r.ingredients]), [['r1', 3], ['r2', 1]]);
-    const plan = (id: string) => call('demo-requester', 'POST', `/recipes/${id}/plan`, { portions: 50, deliver_by: '2026-11-16', diets: ['lactose_free'] });
+    assert.deepEqual((await call('demo-owner', 'GET', '/recipes')).body.map((r: any) => [r.id, r.ingredients]), [['r1', 3], ['r2', 1]]);
+    const plan = (id: string) => call('demo-owner', 'POST', `/recipes/${id}/plan`, { portions: 50, deliver_by: '2026-11-16', diets: ['lactose_free'] });
     const p = (await plan('r1')).body;
-    assert.equal(p.request.recipe.from[0], '2,000 kg Valio Eila maitoa × 50/10 portions = 10 kg');
+    assert.equal(p.request.recipe.from[0], '2,000 kg Arla maitoa × 50/10 portions = 10 kg');
     assert.deepEqual(p.request.recipe.skipped.map((x: any) => x.reason), ['nothing to buy', 'usually in stock']);
-    assert.deepEqual([p.items[0].allocation[0].id, p.items[0].named.used], ['464306', true]);
+    assert.deepEqual([p.items[0].allocation[0].id, p.items[0].named.used], ['462775', true]); // not the top-ranked product
     assert.match(p.items[0].allocation[0].reason, /named in the request/);
     assert.ok(!failed(p).includes('matches_request_text'), 'no source text: quantities come from the recipe');
 
@@ -177,7 +185,7 @@ test('recipe: scaled to portions, the named Valio product preferred, every quant
     assert.equal(q.items[0].named.used, false);
     assert.match(q.items[0].named.why, /E2/);
     assert.notEqual(q.items[0].allocation[0].id, '464440');
-    assert.equal((await call('demo-requester', 'POST', '/recipes/nope/plan', { portions: 5 })).status, 404);
+    assert.equal((await call('demo-owner', 'POST', '/recipes/nope/plan', { portions: 5 })).status, 404);
   } finally {
     delete process.env.RECIPES_PATH;
     rmSync(path, { force: true });
@@ -185,7 +193,7 @@ test('recipe: scaled to portions, the named Valio product preferred, every quant
 });
 
 test('a date in the past asks for clarification', async () => {
-  const r = await call('demo-requester', 'POST', '/proposals', { ...MILK, deliver_by: '2026-11-01' });
+  const r = await call('demo-owner', 'POST', '/proposals', { ...MILK, deliver_by: '2026-11-01' });
   assert.equal(r.status, 400);
   assert.match(r.body.question, /past/);
 });
@@ -199,7 +207,7 @@ test('hard rules: alcohol, policy errors and agent limits never loosen anything'
   const all = PolicySchema.parse({ agent_may_finalise: true, max_order_eur: 1e6, max_line_eur: 1e6, allow_unknown_amount: true });
   const line = { id: '464306', name: 'Bad Santa Alkoholijäätelö 4.2% 120ml', unit_price_cents: 100, sales_units: 1, sales_unit: 'ST', covers: 1, cost_cents: 100, date: '2026-11-16', flags: [], reason: '' };
   const v = evaluate(db, [{ item: { need: 'x', quantity: 1, unit: 'pcs' }, allocation: [line], shortfall: 0, errors: [], options: [{ unit_price_cents: 100 }] }], {}, all);
-  assert.deepEqual(v.rules.filter((r) => !r.ok).map((r) => r.rule), ['alcohol_needs_human']);
+  assert.deepEqual(v.rules.filter((r) => !r.ok && r.hard).map((r) => r.rule), ['alcohol_needs_human']);
 
   const broken = evaluate(db, [null as any], {}, all);
   assert.equal(broken.requires_human, true);
@@ -209,22 +217,37 @@ test('hard rules: alcohol, policy errors and agent limits never loosen anything'
   assert.deepEqual(effectivePolicy(base, { agent_may_finalise: true, max_order_eur: 1e6, allow_split: false }), { ...base, allow_split: false });
 });
 
-test('trust ladder: 5 unchanged approvals suggest autonomy; a human change resets it; nothing changes by itself', async () => {
+test('trust ladder: 3 unchanged approvals suggest autonomy, learned from what was accepted; a rejected autonomous order revokes it', async () => {
+  const create = async () => (await call('demo-agent', 'POST', '/proposals', MILK)).body;
+  const decide = (id: string, decision: string) => call('demo-owner', 'POST', `/proposals/${id}/decision`, { decision });
+  await call('demo-owner', 'PUT', '/policy', { allow_split: false }); // so every milk proposal (a split) asks about splitting
+  await decide((await create()).id, 'reject'); // a clean streak
   const approveNew = async (revise = false) => {
-    const p = (await call('demo-agent', 'POST', '/proposals', MILK)).body;
-    if (revise) await call('demo-approver', 'PATCH', `/proposals/${p.id}`, { item: 0, quantity: 900 });
-    assert.equal((await call('demo-approver', 'POST', `/proposals/${p.id}/decision`, { decision: 'approve' })).status, 200);
+    const p = await create();
+    if (revise) await call('demo-owner', 'PATCH', `/proposals/${p.id}`, { item: 0, quantity: 900 });
+    assert.equal((await decide(p.id, 'approve')).status, 200);
   };
-  for (let i = 0; i < 4; i++) await approveNew();
-  assert.equal((await call('demo-approver', 'GET', '/trust')).body.suggestion, null);
+  for (let i = 0; i < 2; i++) await approveNew();
+  assert.equal((await call('demo-owner', 'GET', '/trust')).body.suggestion, null);
   await approveNew();
-  const t = (await call('demo-approver', 'GET', '/trust')).body;
-  assert.equal(t.streak, 5);
-  assert.match(t.suggestion.text, /5 proposals in a row/);
-  assert.deepEqual([t.suggestion.policy.agent_may_finalise, t.suggestion.policy.max_order_eur, t.suggestion.policy.max_line_eur], [true, 1050, 1050]);
-  assert.equal((await call('demo-approver', 'GET', '/policy')).body.agent_may_finalise, false);
+  const t = (await call('demo-owner', 'GET', '/trust')).body;
+  assert.equal(t.streak, 3);
+  assert.match(t.suggestion.text, /3 proposals in a row.*split across products/);
+  assert.deepEqual(t.suggestion.learned, ['allow_split']); // accepted every time → learned; stock is a hard rule, never learned
+  const s = t.suggestion.policy;
+  assert.deepEqual([s.agent_may_finalise, s.max_order_eur, s.max_line_eur, s.allow_split], [true, 2600, 2600, true]);
+  assert.equal((await call('demo-owner', 'GET', '/policy')).body.agent_may_finalise, false); // nothing changes by itself
+
+  await call('demo-owner', 'PUT', '/policy', s);
+  const auto = await create();
+  assert.equal(auto.status, 'auto_approved');
+  await decide(auto.id, 'reject'); // trust is lost faster than it is earned
+  assert.equal((await call('demo-owner', 'GET', '/policy')).body.agent_may_finalise, false);
+  assert.ok((await call('demo-owner', 'GET', `/audit?proposal=${auto.id}`)).body.some((e: any) => e.event === 'autonomy_revoked'));
+
   await approveNew(true);
-  assert.equal((await call('demo-approver', 'GET', '/trust')).body.streak, 0);
+  assert.equal((await call('demo-owner', 'GET', '/trust')).body.streak, 0);
+  await call('demo-owner', 'PUT', '/policy', {});
 });
 
 test('MCP: an outside agent gets the same guardrails and no approve tool', async () => {
@@ -245,7 +268,7 @@ test('MCP: an outside agent gets the same guardrails and no approve tool', async
     assert.ok(found.matches.some((p: any) => p.id === '464306'));
     const p = text(await client.callTool({ name: 'create_proposal', arguments: MILK }));
     assert.equal(p.requires_human, true);
-    assert.match(p.next, /human approver/);
+    assert.match(p.next, /A person must review/);
     const bad = await client.callTool({ name: 'get_proposal', arguments: { id: 'nope' } });
     assert.equal(bad.isError, true);
   } finally {

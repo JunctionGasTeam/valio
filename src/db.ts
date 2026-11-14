@@ -9,6 +9,9 @@ const DATA = 'data/valio_aimo_junction26_';
 export function openDb(path = DB_PATH) {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+  // One human role since the owner/agent split: drop the old demo token table (requester/approver); seed() refills it.
+  const old = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'tokens'").get() as { sql: string } | undefined;
+  if (old?.sql.includes('requester')) db.exec('DROP TABLE tokens');
   // Runtime tables survive catalogue rebuilds (the offer cache is the demo backup, §11.3).
   db.exec(`
     CREATE TABLE IF NOT EXISTS offer_cache (
@@ -16,7 +19,7 @@ export function openDb(path = DB_PATH) {
     CREATE TABLE IF NOT EXISTS customers (id TEXT PRIMARY KEY, name TEXT, policy TEXT, agents_enabled INTEGER DEFAULT 1);
     CREATE TABLE IF NOT EXISTS tokens (
       token TEXT PRIMARY KEY, customer TEXT REFERENCES customers(id), name TEXT,
-      role TEXT CHECK (role IN ('requester', 'approver', 'agent')), limits TEXT, revoked INTEGER DEFAULT 0);
+      role TEXT CHECK (role IN ('owner', 'agent')), limits TEXT, revoked INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS proposals (
       id TEXT PRIMARY KEY, customer TEXT REFERENCES customers(id), status TEXT, request TEXT, items TEXT, verdict TEXT,
       created_by TEXT, created_at TEXT, updated_at TEXT);

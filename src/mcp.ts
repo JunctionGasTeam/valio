@@ -22,7 +22,7 @@ async function gateway(method: string, path: string, body?: unknown) {
 }
 
 const AFTER = 'The response carries `requires_human` and `next`: tell your user exactly what happens next. '
-  + 'You cannot approve; a human approver signs off in the approval UI unless the policy lets the proposal finalise automatically.';
+  + 'You cannot approve; a person signs off in the app unless the policy lets the proposal finalise automatically.';
 
 const server = new McpServer({ name: 'trusted-trade-agents', version: '0.1.0' });
 const readOnly = { readOnlyHint: true, openWorldHint: false };
@@ -51,7 +51,7 @@ server.registerTool('get_product', {
 
 server.registerTool('check_offers', {
   description: 'Live price and availability from Valio for up to 50 product ids on a delivery date (YYYY-MM-DD). '
-    + 'Query only a shortlist. Exception codes: E2 not deliverable, E3 late, E5 amount unknown, E6 cut-off passed, E7 no price, E9 API trouble.',
+    + 'Query only a shortlist. Exception codes: E2 not deliverable, E3 late, E5 stock not confirmed (a person must accept it), E6 cut-off passed, E7 no price, E9 API trouble.',
   inputSchema: { ids: z.array(z.string()).min(1).max(50), date: z.string() },
   annotations: { readOnlyHint: true, openWorldHint: true },
 }, (a) => gateway('POST', '/offers', a));

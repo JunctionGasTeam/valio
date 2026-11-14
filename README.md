@@ -15,7 +15,7 @@ npm run ui      # approval UI on :5173 (proxies /api to the gateway)
 
 Optional: `GEMINI_API_KEY` in `.env` turns on the model (parsing free text, checking the product type of search hits). Without it everything runs on rules.
 
-Demo tokens (`Authorization: Bearer …`): `demo-agent`, `demo-requester`, `demo-approver`. Set `DEMO_NOW` to fix the clock.
+Demo tokens (`Authorization: Bearer …`): `demo-owner` (the one person using the app: may do everything) and `demo-agent` (the AI agent over MCP: never approves, never changes the policy). Set `DEMO_NOW` to fix the clock.
 
 ## Demo
 

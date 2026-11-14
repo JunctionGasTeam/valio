@@ -37,15 +37,14 @@ test('golden: 1,000 l lactose-free milk on cached offers', async () => {
 
   assert.equal(r.category, '10400');
   assert.ok(!r.dropped.some((d) => d.reasons.some((x) => x.includes('E9'))), 'cache not recorded: run the planner online once');
-  for (const e of ['E2', 'E5', 'E6']) assert.ok(r.exceptions.includes(e), e);
+  for (const e of ['E2', 'E6']) assert.ok(r.exceptions.includes(e), e);
   assert.deepEqual(r.options.slice(0, 3).map((o) => o.id), ['464306', '464401', '464237']);
   for (const o of r.options) assert.deepEqual(ineligibility(o.product, limits), []);
 
-  assert.equal(r.allocation.length, 1);
-  assert.deepEqual(
-    { id: r.allocation[0].id, units: r.allocation[0].sales_units, cost: r.allocation[0].cost_cents, flags: r.allocation[0].flags },
-    { id: '464306', units: 1000, cost: 101000, flags: ['E5'] },
-  );
+  // The top-ranked Eila (464306) has no confirmed stock: the order uses only stock Valio confirms, split three ways.
+  assert.deepEqual(r.allocation.map((a) => [a.id, a.sales_units, a.flags]), [['469363', 384, ['E4']], ['462775', 51, ['E4']], ['463380', 565, ['E4']]]);
+  assert.equal(r.allocation.reduce((s, a) => s + a.cost_cents, 0), 258064);
+  assert.match(r.allocation[0].reason, /best confirmed €2\.48\/l/);
 
   const e2 = r.dropped.find((d) => d.id === '464440')!;
   assert.ok(e2.reasons[0].includes('E2'));
@@ -71,7 +70,7 @@ test('AI product check can only narrow: removals are listed, invented ids are ig
     assert.ok(r.ai_check?.answered);
     assert.ok(!r.options.some((o) => o.id === '464401') && !r.options.some((o) => o.id === '999999'));
     assert.deepEqual(r.excluded.find((e) => e.id === '464401')?.reasons, ['not maito (AI product check)']);
-    assert.equal(r.allocation[0].id, '464306');
+    assert.equal(r.allocation[0].id, '469363');
   } finally {
     f.mock.restore();
     delete process.env.GEMINI_API_KEY;

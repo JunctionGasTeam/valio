@@ -13,7 +13,8 @@ import { evaluate, effectivePolicy, historyKey, PolicySchema, type Policy, type 
 import { detectLimits, parseText, readBack } from './parse.ts';
 import { loadRecipes, scaleRecipe } from './recipes.ts';
 
-type Role = 'requester' | 'approver' | 'agent';
+// One person (the owner) may do everything; the agent is the AI working through MCP and can never approve (hard rule 2).
+type Role = 'owner' | 'agent';
 type Actor = { customer: string; name: string; role: Role; limits: Partial<Policy> | null };
 type Status = 'needs_review' | 'auto_approved' | 'approved' | 'rejected' | 'expired' | 'exported';
 
@@ -52,8 +53,7 @@ export function seed(db: DatabaseSync) {
   db.exec(`
     INSERT OR IGNORE INTO customers (id, name) VALUES ('kaisla', 'Hotel Kaisla');
     INSERT OR IGNORE INTO tokens (token, customer, name, role) VALUES
-      ('demo-approver', 'kaisla', 'Purchasing manager', 'approver'),
-      ('demo-requester', 'kaisla', 'Chef', 'requester'),
+      ('demo-owner', 'kaisla', 'Owner', 'owner'),
       ('demo-agent', 'kaisla', 'Buyer agent', 'agent');`);
 }
 
@@ -63,7 +63,7 @@ const addDays = (d: string, n: number) => new Date(Date.parse(`${d}T12:00:00Z`) 
 const json = (description: string) => ({ description, content: { 'application/json': { schema: z.any() } } });
 const responses = {
   200: json('OK'), 400: json('Invalid request, or a clarification is needed'), 401: json('Missing or unknown token'),
-  403: json('Not allowed for this role'), 404: json('Not found'), 409: json('Conflicts with the current state'),
+  403: json('Not allowed for an agent'), 404: json('Not found'), 409: json('Conflicts with the current state'),
 };
 const route = <M extends RouteConfig['method'], P extends string, R extends RouteConfig['request'] = {}>(
   method: M, path: P, summary: string, request?: R,
@@ -109,7 +109,7 @@ export function createApp(db: DatabaseSync) {
       .run(p.status, JSON.stringify(p.request), JSON.stringify(p.items), JSON.stringify(p.verdict), new Date().toISOString(), p.id);
 
   const NEXT: Record<Status, string> = {
-    needs_review: 'A human approver must review and approve this proposal. Agents cannot approve.',
+    needs_review: 'A person must review and approve this proposal. Agents cannot approve.',
     auto_approved: 'Every policy rule passed: the agent may export it. A human can still reject it until export.',
     approved: 'Approved by a human. Ready for export.',
     rejected: 'Rejected. Nothing will be ordered.', expired: 'Expired: an order cut-off passed. Create a new proposal.',
@@ -239,7 +239,7 @@ export function createApp(db: DatabaseSync) {
     return c.json(rows.map((r) => {
       const v = JSON.parse(r.verdict), req = JSON.parse(r.request);
       return { id: r.id, status: r.status, site: req.site, deliver_by: req.deliver_by, total_cents: v.total_cents,
-        requires_human: v.requires_human, recipe: req.recipe ? `${req.recipe.name} × ${req.recipe.portions} portions` : null, needs: req.items.map((i: any) => `${i.quantity} ${i.unit} ${i.need}`), created_by: r.created_by, created_at: r.created_at };
+        requires_human: v.requires_human, open_checks: v.rules.filter((x: any) => !x.ok).map((x: any) => x.rule), recipe: req.recipe ? `${req.recipe.name} × ${req.recipe.portions} portions` : null, needs: req.items.map((i: any) => `${i.quantity} ${i.unit} ${i.need}`), created_by: r.created_by, created_at: r.created_at };
     }), 200);
   });
 
@@ -269,17 +269,24 @@ export function createApp(db: DatabaseSync) {
     return c.json(view(load(p.id, a)), 200);
   });
 
-  app.openapi(route('post', '/proposals/{id}/decision', 'Approve or reject (human approvers only)', {
+  app.openapi(route('post', '/proposals/{id}/decision', 'Approve or reject (people only, never an agent)', {
     params: IdParam, ...body(Decision),
   }), async (c) => {
     const a = c.get('actor');
-    if (a.role === 'agent') return c.json({ error: 'agents cannot approve or reject (hard rule 2); ask a human approver' }, 403);
-    if (a.role !== 'approver') return c.json({ error: 'only an approver can decide' }, 403);
+    if (a.role === 'agent') return c.json({ error: 'agents cannot approve or reject (hard rule 2); a person decides in the app' }, 403);
     const p = load(c.req.valid('param').id, a);
     if (!p) return c.json({ error: 'no such proposal' }, 404);
     if (!['needs_review', 'auto_approved'].includes(p.status)) return c.json({ error: `cannot decide a ${p.status} proposal` }, 409);
     const { decision, note } = c.req.valid('json');
     if (decision === 'reject') {
+      // Trust is lost faster than it is earned: rejecting an order the agent finished alone switches autonomy off.
+      if (p.status === 'auto_approved') {
+        const pol = policyOf(a.customer);
+        if (pol.agent_may_finalise) {
+          db.prepare('UPDATE customers SET policy = ? WHERE id = ?').run(JSON.stringify({ ...pol, agent_may_finalise: false }), a.customer);
+          audit(p.id, a, 'autonomy_revoked', { reason: 'a person rejected an order the agent finished alone' });
+        }
+      }
       p.status = 'rejected'; save(p); audit(p.id, a, 'rejected', { note });
       return c.json(view(load(p.id, a)), 200);
     }
@@ -332,36 +339,43 @@ export function createApp(db: DatabaseSync) {
   }))), async (c) => c.json(await parseText(c.req.valid('json').text), 200));
 
   // §8.4 trust ladder: approvals in a row a human made without changing the proposal. Derived from the audit, never
-  // stored; a human revision or a rejection resets it. It only suggests: the policy changes when an approver saves it.
+  // stored; a human revision or a rejection resets it. It only suggests: the policy changes when the owner saves it.
   app.openapi(route('get', '/trust', 'Unchanged approvals in a row and a policy suggestion'), (c) => {
     const a = c.get('actor');
-    const THRESHOLD = 5;
+    const THRESHOLD = 3;
     const rows = db.prepare(
       `SELECT a.proposal, a.event, a.actor, p.verdict FROM audit a JOIN proposals p ON p.id = a.proposal
        WHERE a.customer = ? AND a.event IN ('revised', 'approved', 'rejected') ORDER BY a.seq`,
     ).all(a.customer) as any[];
     const changed = new Set<string>();
-    let streak = 0, maxTotal = 0;
+    let streak: Verdict[] = [];
     for (const r of rows) {
       if (r.event === 'revised' && !r.actor.startsWith('agent:')) changed.add(r.proposal);
-      else if (r.event === 'rejected' || (r.event === 'approved' && changed.has(r.proposal))) { streak = 0; maxTotal = 0; }
-      else if (r.event === 'approved') { streak++; maxTotal = Math.max(maxTotal, JSON.parse(r.verdict).total_cents ?? 0); }
+      else if (r.event === 'rejected' || (r.event === 'approved' && changed.has(r.proposal))) streak = [];
+      else if (r.event === 'approved') streak.push(JSON.parse(r.verdict));
     }
     const policy = policyOf(a.customer);
-    const limit = Math.ceil(maxTotal / 100 / 50) * 50; // round up to €50
-    const suggestion = streak >= THRESHOLD && !policy.agent_may_finalise
-      ? { text: `You approved ${streak} proposals in a row without changing them. Let the agent finalise orders up to €${limit}?`,
-          policy: { ...policy, agent_may_finalise: true, max_order_eur: limit, max_line_eur: Math.max(policy.max_line_eur, limit) } }
+    const limit = Math.ceil(Math.max(0, ...streak.map((v) => v.total_cents ?? 0)) / 100 / 50) * 50; // round up to €50
+    // Learn from what the person accepted every time: a soft yes/no rule that failed in every approval of the streak.
+    // Money limits come from the totals above; hard rules (stock, allergens, quantities, …) are never loosened.
+    const acceptedEvery = (rule: string) => streak.every((v) => v.rules.some((x) => x.rule === rule && !x.ok));
+    const learned = (['allow_split'] as const).filter((k) => !policy[k] && acceptedEvery(k));
+    const suggestion = streak.length >= THRESHOLD && !policy.agent_may_finalise
+      ? { text: `You approved ${streak.length} proposals in a row without changing them. Let the agent finish routine orders up to €${limit} on its own`
+            + `${learned.includes('allow_split') ? ', including orders split across products, as you accepted each time' : ''}?`,
+          learned,
+          policy: { ...policy, agent_may_finalise: true, max_order_eur: limit, max_line_eur: Math.max(policy.max_line_eur, limit),
+            ...Object.fromEntries(learned.map((k) => [k, true])) } }
       : null;
-    return c.json({ streak, threshold: THRESHOLD, suggestion }, 200);
+    return c.json({ streak: streak.length, threshold: THRESHOLD, suggestion }, 200);
   });
 
   // --- policy and audit --------------------------------------------------------------------------------------------
   app.openapi(route('get', '/policy', 'Customer policy'), (c) => c.json(policyOf(c.get('actor').customer), 200));
 
-  app.openapi(route('put', '/policy', 'Replace the customer policy (approvers only)', body(PolicySchema)), (c) => {
+  app.openapi(route('put', '/policy', 'Replace the customer policy (people only, never an agent)', body(PolicySchema)), (c) => {
     const a = c.get('actor');
-    if (a.role !== 'approver') return c.json({ error: 'only an approver can change the policy' }, 403);
+    if (a.role === 'agent') return c.json({ error: 'agents cannot change the policy' }, 403);
     const before = policyOf(a.customer), after = c.req.valid('json');
     db.prepare('UPDATE customers SET policy = ? WHERE id = ?').run(JSON.stringify(after), a.customer);
     audit(null, a, 'policy_changed', { before, after });

@@ -9,7 +9,6 @@ export const PolicySchema = z.object({
   agent_may_finalise: z.boolean().default(false),
   max_order_eur: z.number().min(0).default(500),
   max_line_eur: z.number().min(0).default(200),
-  allow_unknown_amount: z.boolean().default(false),
   allow_split: z.boolean().default(true),
   max_over_best_price_pct: z.number().min(0).default(10),
 }).openapi('Policy');
@@ -28,7 +27,7 @@ export function effectivePolicy(customer: Policy, limits: Partial<Policy> | null
 
 export type PlannedItem = {
   item: { need: string; quantity: number; unit: string }; category?: string | null;
-  allocation: Part[]; shortfall: number; errors: string[]; options: { unit_price_cents: number }[];
+  allocation: Part[]; shortfall: number; errors: string[]; options: { unit_price_cents: number; available?: number | null; late?: boolean }[];
 };
 export type Rule = { rule: string; hard: boolean; ok: boolean; detail: string };
 export type Verdict = { rules: Rule[]; requires_human: boolean; total_cents: number | null };
@@ -39,6 +38,7 @@ const ALCOHOL = /alkoholi(?!ton|holiton)/i;
 const eur = (c: number) => `€${(c / 100).toFixed(2)}`;
 
 // A quantity this many times above or below the usual one needs a human: 1000 typed for 100 is plausible text.
+// MIN_HISTORY approved orders in a category also make it routine: the only orders an agent may finish alone.
 const UNUSUAL = 3, MIN_HISTORY = 3;
 const median = (xs: number[]) => { const s = [...xs].sort((a, b) => a - b); return (s[(s.length - 1) >> 1] + s[s.length >> 1]) / 2; };
 
@@ -82,22 +82,33 @@ export function evaluate(
       return x >= UNUSUAL || x <= 1 / UNUSUAL ? [`${it.item.need} ${it.item.quantity} ${it.item.unit}, usually ${+usual.toFixed(3)} ${it.item.unit} (${past.length} past orders)`] : [];
     });
     add('usual_quantity', true, !odd.length, 'quantities in line with past orders, or too few to compare', `unusual quantity, check for a typo: ${odd.join('; ')}`);
+    // Only orders sure to be delivered go through: a line Valio does not confirm stock for always needs a person.
+    const unknown = lines.filter(({ a }) => a.flags.includes('E5'));
+    add('confirmed_stock', true, !unknown.length, 'Valio confirms stock for every line', `stock not confirmed: ${ids(unknown)}`);
     if (limits.budget_eur != null)
       add('request_budget', true, total <= limits.budget_eur * 100, `${eur(total)} within budget €${limits.budget_eur}`, `${eur(total)} over budget €${limits.budget_eur}`);
 
-    // Customer policy (approver edits, agent keys can only tighten).
+    // Customer policy (the owner edits it, agent keys can only tighten it).
     add('agent_may_finalise', false, policy.agent_may_finalise, 'policy lets the agent finalise within limits', 'policy: every order needs a human sign-off');
     add('max_order_eur', false, total <= policy.max_order_eur * 100, `order ${eur(total)} ≤ €${policy.max_order_eur}`, `order ${eur(total)} > €${policy.max_order_eur}`);
     const big = lines.filter(({ a }) => a.cost_cents > policy.max_line_eur * 100);
     add('max_line_eur', false, !big.length, `every line ≤ €${policy.max_line_eur}`, `lines over €${policy.max_line_eur}: ${ids(big)}`);
-    const unknown = lines.filter(({ a }) => a.flags.includes('E5'));
-    add('allow_unknown_amount', false, policy.allow_unknown_amount || !unknown.length, 'amounts confirmed or allowed unconfirmed', `amount not confirmed: ${ids(unknown)}`);
     const split = items.filter((it) => it.allocation.length > 1);
     add('allow_split', false, policy.allow_split || !split.length, 'no split or splits allowed', `split items: ${split.map((it) => it.item.need).join(', ')}`);
-    const pricey = lines.filter(({ it, a }) =>
-      a.unit_price_cents > Math.min(...it.options.map((o) => o.unit_price_cents)) * (1 + policy.max_over_best_price_pct / 100) + 1e-9);
-    add('max_over_best_price_pct', false, !pricey.length, `every line within ${policy.max_over_best_price_pct} % of the best price per unit`,
-      `more than ${policy.max_over_best_price_pct} % over the best price per unit: ${ids(pricey)}`);
+    // Reference: the cheapest option sure to arrive (an unconfirmed bargain is not a fair comparison).
+    const reference = (it: PlannedItem) => {
+      const sure = it.options.filter((o) => o.available !== null && o.available !== undefined && !o.late);
+      return Math.min(...(sure.length ? sure : it.options).map((o) => o.unit_price_cents));
+    };
+    const pricey = lines.filter(({ it, a }) => a.unit_price_cents > reference(it) * (1 + policy.max_over_best_price_pct / 100) + 1e-9);
+    add('max_over_best_price_pct', false, !pricey.length, `every line within ${policy.max_over_best_price_pct} % of the cheapest confirmed price per unit`,
+      `more than ${policy.max_over_best_price_pct} % over the cheapest confirmed price per unit: ${ids(pricey)}`);
+    // Autonomy covers routine orders only: products this customer has approved often enough.
+    if (policy.agent_may_finalise) {
+      const fresh = items.filter((it) => (history.get(historyKey(it))?.length ?? 0) < MIN_HISTORY);
+      add('routine_order', false, !fresh.length, `every item ordered and approved at least ${MIN_HISTORY} times before`,
+        `not routine yet (fewer than ${MIN_HISTORY} approved orders): ${fresh.map((it) => it.item.need).join(', ')}`);
+    }
 
     return { rules, requires_human: rules.some((r) => !r.ok), total_cents: total };
   } catch (e) {
