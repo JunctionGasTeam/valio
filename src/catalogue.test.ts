@@ -37,3 +37,16 @@ test('MAY_CONTAIN counts as excluded', () => {
 test('user text cannot break the FTS query', () => {
   assert.doesNotThrow(() => search(db, 'milk" OR NEAR(x) *'));
 });
+
+test('only name matches: a category neighbour never stands in for what was asked', () => {
+  const { matches } = search(db, 'kauraleipä', {}, 200);
+  assert.ok(matches.length > 0);
+  for (const p of matches) assert.match(`${p.name_fi} ${p.name_en} ${p.name_sv}`.toLowerCase(), /kauraleipä/);
+  assert.ok(!matches.some((p) => p.id === '466005'), 'Pågen wheat toast is not oat bread');
+});
+
+test('milk allergy also excludes products that list only lactose', () => {
+  const goat = getProduct(db, '473013')!; // Soignon goat cheese: data lists ML, not AM
+  assert.deepEqual(goat.contains, ['ML']);
+  assert.deepEqual(ineligibility(goat, { exclude_allergens: ['AM'] }), ['contains allergen AM']);
+});

@@ -122,10 +122,25 @@ Buyer / buyer's agent ──► Gateway (MCP + REST, one codebase, TypeScript)
 ```
 
 - **One implementation.** TypeScript on Node (≥ 22) end to end. REST with Hono; the OpenAPI document is generated from the same zod schemas the routes validate with (`@hono/zod-openapi`). MCP tools (`@modelcontextprotocol/sdk`) are thin wrappers over the same functions. Storage is the built-in `node:sqlite` with FTS5; tests use `node:test`. A small web UI (React + Vite) for the human side shares the zod types. No second engine in the browser.
-- **LLM**: two jobs only, turning text into a `PurchaseRequest` and wording the explanation from computed facts. Any OpenAI-compatible or Anthropic endpoint, set by environment. A deterministic fallback parser keeps the product working with the model off. The model never sees or decides prices, eligibility, quantities or policy verdicts.
+- **LLM** (Gemini through its OpenAI-compatible endpoint; any OpenAI-compatible endpoint by environment: `GEMINI_API_KEY`, `LLM_MODEL`, `LLM_BASE`). Jobs:
+  1. **Parse** text into a `PurchaseRequest`, normalising the need to the Finnish product noun used in product names ("oat bread" → `kauraleipä`). The rules parser runs too: its diet/allergen findings are always added, and its quantities, units and date win when it found them, so a model misreading "1,000" cannot change the order.
+  2. **Product-type check**: after the local search, the model sees the need and the candidate names and says which ones *are* that product. It can only **remove** candidates (each removal is listed with its reason), never add one. Substring search alone cannot tell `kauraleipä` from `kauraleipämix`.
+  3. Wording the explanation from computed facts: not built; the template reason stays.
+  The model never sees or decides prices, allergen/diet eligibility, quantities or policy verdicts. Model off, slow or failing → rules only, the product keeps working.
 - **Seam for production**: the order sink is one function today (`toCsv`, file export by GTIN). A real order API becomes a second sink next to it; nothing else changes. (No interface until the second implementation exists.)
 - **Text parsing today**: rules only (`src/parse.ts`: quantities, units, dates, weekdays, diets, allergens in en/fi/sv; asks when quantity or product is missing). The LLM path plugs in when the provider is decided (15.4); the keyword detector stays in front of it either way.
 
+
+### 4b. Recipes → order
+
+Valio Aimo publishes 2,091 professional-kitchen recipes (JSON search API `valioaimo.fi/valio-search-client/recipes/?account=valioaimo`, `haku=` text search, facets for course, diet, kitchen type; each recipe page has schema.org `Recipe` JSON-LD with `recipeYield` in portions and every `recipeIngredient` in kg). Quantities in kg match the planner directly.
+
+- **Data**: `npm run recipes` (online, ~2 min, one request at a time) picks 15 simple recipes (≤ 10 lines, every line `<n> kg <name>`, ≥ 80 % of buyable lines found in the catalogue, no alcohol) across soup, main, salad, side, dessert, vegan, into `data/recipes.json`. Valio content: gitignored, never published. The model normalises each line once (`0,900 kg täysjyväpastaa` → need `täysjyväpasta`; water → skip; salt, pepper, frying oil → `pantry`); rules without a key. Valio products the recipe names (EANs in the listing) are linked to their line.
+- **Scaling** (`scaleRecipe`): × portions / yield, rounded up to 10 g, same ingredient on two lines merged. Skipped lines are listed with the reason: nothing to buy (water), to taste (0 kg), usually in stock (pantry, unless ticked).
+- **Planning**: `POST /recipes/{id}/plan` → the same `createProposal` as every other path (limits, three items at a time, policy, decision record). An item may name a product (`items[].product`): it is always a candidate when it meets the limits, the AI check cannot remove it, and it is allocated first when deliverable; otherwise the line says why not ("order cut-off passed (E6)"). Liquids the recipe weighs are matched to litre products at 1 l = 1 kg (flag `litre_as_kg`).
+- **Trust**: no source text, so `matches_request_text` does not apply; instead the proposal shows every quantity traced to its recipe line (`0,900 kg täysjyväpastaa × 120/18 portions = 6 kg`) and every skipped line. `usual_quantity` applies as usual.
+- **Coverage today** (100 portions, Wed 18 Nov, recorded): 7 of 15 recipes fully covered; the gaps are cut-offs (E6), not deliverable (E2), and a few products not in the dataset (E1: Valio curd fillings, tyrnimehu, fresh strawberries).
+- Not built: menus of several recipes with shared ingredients summed; MCP tools for recipes.
 ---
 
 ## 5. Gateway interface (MCP tools = REST routes)
@@ -177,7 +192,7 @@ Every response that the agent acts on carries `policy_verdict` and `requires_hum
 
 ### 7.1 Steps per item
 
-1. **Find**: full-text search over fi/en/sv names, then category of the top hits to widen the pool. Max 200 local candidates.
+1. **Find**: full-text search over fi/en/sv names; the category most hits fall into ranks first. Only name matches are candidates: widening by category was removed after it turned "kauraleipä" into wheat toast when every oat bread was undeliverable. Max 200 local candidates.
 2. **Hard filters** (local data, each exclusion recorded with its reason): sales block in data, excluded allergen (`CONTAINS` **or** `MAY_CONTAIN`), required diet not satisfied, required label missing, **no allergen statement while any allergen or diet limit applies** ("allergen data missing"). Unit matching is **not** a local filter: content is often missing in data but known to the price API, so it is checked after offers (7.2).
 3. **Shortlist**: top 50 eligible, the dominant category first. 50, not 30: the milk category alone has 36 eligible lactose-free products, and cutting a category can hide the cheapest option. Still one call per item.
 4. **Offers**: one `check_offers` call for the shortlist and `deliver_by`.
@@ -227,6 +242,10 @@ Before approval the gateway re-runs `check_offers` for the chosen lines. If pric
 4. Alcohol categories always need a human (licence and quota rules exist in the webshop).
 5. Every line carries a reason built from computed facts; every number in the explanation must appear in those facts, otherwise the template text is used.
 6. Ambiguous request → clarification. Policy engine error → `requires_human`.
+7. Plausible but wrong requests (the person typed or the agent read 1000 for 100) pass every other rule, so:
+   - `matches_request_text`: with a source text, every item quantity must be a number written in it (500 g → 0.5 kg counts). An agent that misreads, or revises a quantity later, needs a human.
+   - `usual_quantity`: with at least 3 approved past orders in the same category and unit, a quantity ≥ 3× or ≤ ⅓ of their median needs a human ("usually 200 l"). Demo: the 1,000 l request after five ~200 l orders.
+   - Read-back: every proposal shows the original text next to the request as understood. Each field is marked from the text, assumed (date, priorities) or not in the text (quantity, added limit). Computed by rules (`readBack`), so it also checks an outside agent's interpretation.
 
 ### 8.2 Customer policy (approver edits)
 
@@ -308,7 +327,8 @@ Stock products have cut-off 15 Nov 17:00; Terminal products report 12 Nov (E6).
 2. **Proposal**: open the approval UI. 1,000 l of the cheapest option, flagged "amount not confirmed" (E5); the 0.5 l product is listed as not available (E2); Terminal products dropped for a passed cut-off (E6). Each line has its reason.
 3. **Guardrail**: the agent tries to finalise; the gateway answers `requires_human` (policy: unknown amount, over €500). The agent tells its user so.
 4. **Human**: the approver switches to "confirmed stock only" (`PATCH` with `confirmed_only`): the planner splits 384 + 51 + 565 l across three Arla products, €2,580.64 instead of €1,010, and the policy flags "more than 10 % over the best price per unit". The approver goes back to the unknown-amount option or accepts the split. Approve (prices re-checked first). Export the file.
-5. **Path to production**: show the file and the decision record; one line on importing it into today's webshop cart ("Tuo tiedostosta") and where the order API would plug in. Trust ladder banner as the closing line.
+5. *(optional)* **Recipe**: Recipes → a soup → 120 portions → Plan order. Every line traced to the recipe, Valio products named in the recipe used first, a passed cut-off shown on its line.
+6. **Path to production**: show the file and the decision record; one line on importing it into today's webshop cart ("Tuo tiedostosta") and where the order API would plug in. Trust ladder banner as the closing line.
 
 ### 11.3 Demo safety
 
@@ -367,8 +387,9 @@ Cut order if late: trust ladder banner → sustainability preset → LLM explana
 
 ## 15. Open questions
 
-1. Terminal products return a `closingTime` in the past for a future `availableDate`. Can they be ordered for that date or not? (Ask organisers. Until then: E6.)
+1. Terminal products return a `closingTime` in the past for a future `availableDate`. Can they be ordered for that date or not? (Ask organisers. Until then: E6.) **High impact:** whole product groups disappear, e.g. 12 of 14 oat breads (all Terminal, cut-off 12 Nov 12:30, available 16 Nov).
 2. Exact webshop import file format. Get it by exporting a cart with "Vie Exceliin" and importing a test file into an empty cart at the booth.
 3. Is the GS1 allergen code mapping (AM milk, AW gluten, ML lactose, …) confirmed by Valio for this dataset?
-4. Hosted LLM allowed for the demo, or local only?
+4. Hosted LLM allowed for the demo, or local only? (We use Gemini; request text and product names are sent to Google. Confirm with organisers.)
+6. May we use Valio Aimo's public recipes (§4b) in the demo? We keep 15 locally, fetched once, not published.
 5. Team size, pitch slot and whether judging happens before Sunday 17:00 (the stock cut-off in the mock data).

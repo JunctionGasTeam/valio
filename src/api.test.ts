@@ -1,6 +1,6 @@
 // Gateway + policy (context.md §13.4, §13.5). Needs data/valio.db with the recorded milk offers for 2026-11-16.
 import { test, mock, after } from 'node:test';
-import { rmSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +11,10 @@ import { evaluate, effectivePolicy, PolicySchema } from './policy.ts';
 process.env.DEMO_NOW = '2026-11-14T12:00:00+0200';
 const tmp = join(tmpdir(), `tta-test-${process.pid}.db`);
 openDb().exec(`VACUUM INTO '${tmp}'`);
+// Catalogue + recorded offers from the real DB, but none of its demo state (proposals, decision record, saved policy).
+const fresh = openDb(tmp);
+fresh.exec(`DROP TABLE audit; DROP TABLE proposals; DROP TABLE tokens; DROP TABLE customers;`);
+fresh.close();
 const db = openDb(tmp);
 seed(db);
 const app = createApp(db);
@@ -126,6 +130,58 @@ test('limits found in the source text are added even if the agent left them out'
   const parsed = (await call('demo-agent', 'POST', '/parse', { text: 'I need 1,000 litres of lactose-free milk by Monday' })).body;
   assert.equal(parsed.clarification, null);
   assert.equal(parsed.request.deliver_by, '2026-11-16');
+});
+
+test('trust: a quantity not in the text, or far from the usual one, needs a human', async () => {
+  const loose = { agent_may_finalise: true, max_order_eur: 1e5, max_line_eur: 1e5, allow_unknown_amount: true };
+  await call('demo-approver', 'PUT', '/policy', loose);
+  // The agent read "100" as 1000: plausible, under every limit, but not what was written.
+  const typo = (await call('demo-agent', 'POST', '/proposals', { ...MILK, source_text: '100 l lactose-free milk by Monday' })).body;
+  assert.equal(typo.status, 'needs_review');
+  assert.deepEqual(failed(typo), ['matches_request_text']);
+  assert.deepEqual(typo.read_back.items, [{ quantity_in_text: false, words: 'milk' }]);
+
+  const { evaluate, PolicySchema: P } = await import('./policy.ts');
+  const item = (quantity: number) => ({ item: { need: 'maito', quantity, unit: 'l' }, category: '10400', allocation: [], shortfall: 0, errors: [], options: [] });
+  const history = new Map([['10400|l', [150, 200, 180, 220, 200]]]);
+  const rule = (q: number, h = history) => evaluate(db, [item(q)], {}, P.parse(loose), h).rules.find((r) => r.rule === 'usual_quantity')!;
+  assert.match(rule(1000).detail, /usually 200 l \(5 past orders\)/);
+  assert.equal(rule(1000).ok, false);
+  assert.equal(rule(20).ok, false);
+  assert.equal(rule(300).ok, true);
+  assert.equal(rule(1000, new Map([['10400|l', [200, 200]]])).ok, true); // too little history to judge
+  await call('demo-approver', 'PUT', '/policy', {});
+});
+
+test('recipe: scaled to portions, the named Valio product preferred, every quantity traced to its line', async () => {
+  const path = join(tmpdir(), `tta-recipes-${process.pid}.json`);
+  const line = (text: string, kg: number, need: string | null, product: string | null = null, pantry = false) => ({ text, kg, need, product, pantry });
+  writeFileSync(path, JSON.stringify([
+    { id: 'r1', name: 'Maitokeitto', url: 'https://example.invalid/r1', image: null, yield: 10, course: 'Soup', diets: [], lines: [
+      line('2,000 kg Valio Eila maitoa', 2, 'maito', '464306'), line('0,500 kg vettä', 0.5, null), line('0,010 kg suolaa', 0.01, 'suola', null, true)] },
+    { id: 'r2', name: 'Toinen', url: 'https://example.invalid/r2', image: null, yield: 10, course: 'Soup', diets: [], lines: [
+      line('2,000 kg Valio maitoa', 2, 'maito', '464440')] },
+  ]));
+  process.env.RECIPES_PATH = path;
+  try {
+    assert.deepEqual((await call('demo-requester', 'GET', '/recipes')).body.map((r: any) => [r.id, r.ingredients]), [['r1', 3], ['r2', 1]]);
+    const plan = (id: string) => call('demo-requester', 'POST', `/recipes/${id}/plan`, { portions: 50, deliver_by: '2026-11-16', diets: ['lactose_free'] });
+    const p = (await plan('r1')).body;
+    assert.equal(p.request.recipe.from[0], '2,000 kg Valio Eila maitoa × 50/10 portions = 10 kg');
+    assert.deepEqual(p.request.recipe.skipped.map((x: any) => x.reason), ['nothing to buy', 'usually in stock']);
+    assert.deepEqual([p.items[0].allocation[0].id, p.items[0].named.used], ['464306', true]);
+    assert.match(p.items[0].allocation[0].reason, /named in the request/);
+    assert.ok(!failed(p).includes('matches_request_text'), 'no source text: quantities come from the recipe');
+
+    const q = (await plan('r2')).body; // named product cannot be delivered → the best other option, with the reason
+    assert.equal(q.items[0].named.used, false);
+    assert.match(q.items[0].named.why, /E2/);
+    assert.notEqual(q.items[0].allocation[0].id, '464440');
+    assert.equal((await call('demo-requester', 'POST', '/recipes/nope/plan', { portions: 5 })).status, 404);
+  } finally {
+    delete process.env.RECIPES_PATH;
+    rmSync(path, { force: true });
+  }
 });
 
 test('a date in the past asks for clarification', async () => {

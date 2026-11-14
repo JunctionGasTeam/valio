@@ -9,8 +9,9 @@ import { openDb } from './db.ts';
 import { search, getProduct } from './catalogue.ts';
 import { checkOffers, now } from './offers.ts';
 import { planItem, PRESETS, type Overrides, type Priorities } from './planner.ts';
-import { evaluate, effectivePolicy, PolicySchema, type Policy, type Verdict } from './policy.ts';
-import { detectLimits, parseRequest } from './parse.ts';
+import { evaluate, effectivePolicy, historyKey, PolicySchema, type Policy, type Verdict } from './policy.ts';
+import { detectLimits, parseText, readBack } from './parse.ts';
+import { loadRecipes, scaleRecipe } from './recipes.ts';
 
 type Role = 'requester' | 'approver' | 'agent';
 type Actor = { customer: string; name: string; role: Role; limits: Partial<Policy> | null };
@@ -25,7 +26,8 @@ export const PurchaseRequest = z.object({
     need: z.string().min(1).max(200).openapi({ example: 'maito' }),
     quantity: z.number().positive().max(1_000_000).openapi({ example: 1000 }),
     unit: z.enum(['kg', 'l', 'pcs']),
-  })).min(1).max(20),
+    product: z.string().max(20).optional().openapi({ description: 'A product id to prefer when it is deliverable and meets the limits' }),
+  })).min(1).max(30),
   exclude_allergens: z.array(z.string().regex(/^[A-Z]{2}$/)).default([]).openapi({ description: 'GS1 allergen codes, e.g. AM milk, AW gluten' }),
   diets: z.array(Diet).default([]),
   labels_required: z.array(z.string().max(80)).default([]),
@@ -33,7 +35,9 @@ export const PurchaseRequest = z.object({
   budget_eur: z.number().positive().nullable().default(null),
   source_text: z.string().max(5000).optional(),
 }).openapi('PurchaseRequest');
-type Request = z.infer<typeof PurchaseRequest> & { deliver_by: string; deliver_by_defaulted?: boolean };
+// `recipe` is set only by POST /recipes/{id}/plan: where each item's quantity came from (the read-back for recipes).
+type RecipeRef = { id: string; name: string; url: string; yield: number; portions: number; from: string[]; skipped: { text: string; reason: string }[] };
+type Request = z.infer<typeof PurchaseRequest> & { deliver_by: string; deliver_by_defaulted?: boolean; recipe?: RecipeRef };
 
 const Revision = z.object({
   item: z.number().int().min(0),
@@ -117,7 +121,7 @@ export function createApp(db: DatabaseSync) {
     requires_human: p.verdict.requires_human, next: NEXT[p.status as Status], policy_verdict: p.verdict,
     // Full excluded lists stay in the audit record; responses carry the first 20 so agents' context stays small.
     items: p.items.map((it: any) => ({ ...it, excluded: it.excluded.slice(0, 20), excluded_total: it.excluded.length })),
-    request: p.request, created_by: p.created_by, created_at: p.created_at, updated_at: p.updated_at,
+    request: p.request, read_back: readBack(p.request), created_by: p.created_by, created_at: p.created_at, updated_at: p.updated_at,
   });
 
   // Plan one item; options keep their offers and scores (decision record), drop the bulky product records.
@@ -126,9 +130,16 @@ export function createApp(db: DatabaseSync) {
     const res = await planItem(db, r.items[i], limits, r.deliver_by, r.priorities, overrides);
     return { ...res, options: res.options.map(({ product, ...o }) => o) };
   };
+  // Quantities the customer approved before (last 50 approved proposals), for the usual_quantity rule.
+  const historyOf = (customer: string) => {
+    const h = new Map<string, number[]>();
+    const rows = db.prepare(`SELECT items FROM proposals WHERE customer = ? AND status IN ('approved', 'exported') ORDER BY created_at DESC LIMIT 50`).all(customer) as any[];
+    for (const r of rows) for (const it of JSON.parse(r.items)) h.set(historyKey(it), [...(h.get(historyKey(it)) ?? []), it.item.quantity]);
+    return h;
+  };
   const verdictFor = (r: Request, items: any[], a: Actor) =>
-    evaluate(db, items, { exclude_allergens: r.exclude_allergens, diets: r.diets, labels_required: r.labels_required, budget_eur: r.budget_eur },
-      effectivePolicy(policyOf(a.customer), a.role === 'agent' ? a.limits : null));
+    evaluate(db, items, { exclude_allergens: r.exclude_allergens, diets: r.diets, labels_required: r.labels_required, budget_eur: r.budget_eur, source_text: r.source_text },
+      effectivePolicy(policyOf(a.customer), a.role === 'agent' ? a.limits : null), historyOf(a.customer));
 
   // --- catalogue and offers ----------------------------------------------------------------------------------------
   const list = z.string().optional().transform((s) => (s ? s.split(',').map((x) => x.trim()).filter(Boolean) : []));
@@ -160,20 +171,24 @@ export function createApp(db: DatabaseSync) {
   });
 
   // --- proposals ---------------------------------------------------------------------------------------------------
-  app.openapi(route('post', '/proposals', 'Plan a purchase request into a proposal with a policy verdict', body(PurchaseRequest)), async (c) => {
-    const a = c.get('actor');
-    const input = c.req.valid('json');
+  // Every way in (free text, form, agent, recipe) ends here: same limits, planning, policy and decision record.
+  const createProposal = async (a: Actor, input: z.infer<typeof PurchaseRequest>, recipe?: RecipeRef) => {
     const today = helsinkiToday();
     if (input.deliver_by && input.deliver_by < today)
-      return c.json({ error: 'clarification needed', question: `The delivery date ${input.deliver_by} is in the past. Which date do you need?` }, 400);
+      return { error: 'clarification needed', question: `The delivery date ${input.deliver_by} is in the past. Which date do you need?` };
     // §6: limits the keyword detector finds in the source text are always added; an agent cannot drop them.
     const found = detectLimits(input.source_text ?? '');
     const r: Request = {
       ...input, deliver_by: input.deliver_by ?? addDays(today, 1), deliver_by_defaulted: !input.deliver_by,
       diets: [...new Set([...input.diets, ...found.diets])], exclude_allergens: [...new Set([...input.exclude_allergens, ...found.exclude_allergens])],
+      ...(recipe ? { recipe } : {}),
     };
-    const items = [];
-    for (let i = 0; i < r.items.length; i++) items.push(await plan(r, i)); // sequential: no API bursts
+    // Three items at a time: a recipe has up to ten, one by one with the model takes half a minute. 429s are retried.
+    const items: any[] = new Array(r.items.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(3, r.items.length) }, async () => {
+      while (next < r.items.length) { const i = next++; items[i] = await plan(r, i); }
+    }));
     const verdict = verdictFor(r, items, a);
     const p = { id: randomUUID(), status: (verdict.requires_human ? 'needs_review' : 'auto_approved') as Status, request: r, items, verdict };
     const at = new Date().toISOString();
@@ -181,7 +196,42 @@ export function createApp(db: DatabaseSync) {
       p.id, a.customer, p.status, JSON.stringify(r), JSON.stringify(items), JSON.stringify(verdict), `${a.role}:${a.name}`, at, at);
     audit(p.id, a, 'created', { request: r, items });
     audit(p.id, a, 'policy_verdict', { status: p.status, ...verdict });
-    return c.json(view(load(p.id, a)), 200);
+    return view(load(p.id, a));
+  };
+  app.openapi(route('post', '/proposals', 'Plan a purchase request into a proposal with a policy verdict', body(PurchaseRequest)), async (c) => {
+    const out = await createProposal(c.get('actor'), c.req.valid('json'));
+    return 'question' in out ? c.json(out, 400) : c.json(out, 200);
+  });
+
+  // --- recipes (Valio Aimo professional-kitchen recipes, data/recipes.json) ----------------------------------------
+  const RecipeId = z.object({ id: z.string() });
+  app.openapi(route('get', '/recipes', 'Recipes to plan an order from'), (c) =>
+    c.json(loadRecipes().map(({ lines, ...r }) => ({ ...r, ingredients: lines.length })), 200));
+  app.openapi(route('get', '/recipes/{id}', 'One recipe with its ingredient lines', { params: RecipeId }), (c) => {
+    const r = loadRecipes().find((x) => x.id === c.req.valid('param').id);
+    return r ? c.json(r, 200) : c.json({ error: 'no such recipe' }, 404);
+  });
+  app.openapi(route('post', '/recipes/{id}/plan', 'Scale a recipe to N portions and plan its ingredients into a proposal', {
+    params: RecipeId, ...body(z.object({
+      portions: z.number().int().min(1).max(5000),
+      site: z.string().min(1).max(200).default('Hotel Kaisla Helsinki'),
+      deliver_by: DateStr.optional(),
+      pantry: z.array(z.string().max(100)).default([]).openapi({ description: 'Usually-in-stock ingredients to buy anyway (their need names)' }),
+      exclude_allergens: z.array(z.string().regex(/^[A-Z]{2}$/)).default([]),
+      diets: z.array(Diet).default([]),
+      priorities: z.enum(Object.keys(PRESETS) as [Priorities, ...Priorities[]]).default('price_and_availability'),
+    })),
+  }), async (c) => {
+    const recipe = loadRecipes().find((x) => x.id === c.req.valid('param').id);
+    if (!recipe) return c.json({ error: 'no such recipe' }, 404);
+    const { portions, pantry, ...rest } = c.req.valid('json');
+    const scaled = scaleRecipe(recipe, portions, pantry);
+    if (!scaled.items.length) return c.json({ error: 'clarification needed', question: 'Nothing to buy for this recipe. Include the usually-in-stock items?' }, 400);
+    const out = await createProposal(c.get('actor'), {
+      ...rest, labels_required: [], budget_eur: null,
+      items: scaled.items.map(({ need, quantity, unit, product }) => ({ need, quantity, unit, ...(product ? { product } : {}) })),
+    }, { id: recipe.id, name: recipe.name, url: recipe.url, yield: recipe.yield, portions, from: scaled.items.map((i) => i.from), skipped: scaled.skipped });
+    return 'question' in out ? c.json(out, 400) : c.json(out, 200);
   });
 
   app.openapi(route('get', '/proposals', 'Latest proposals of the caller\'s customer'), (c) => {
@@ -189,7 +239,7 @@ export function createApp(db: DatabaseSync) {
     return c.json(rows.map((r) => {
       const v = JSON.parse(r.verdict), req = JSON.parse(r.request);
       return { id: r.id, status: r.status, site: req.site, deliver_by: req.deliver_by, total_cents: v.total_cents,
-        requires_human: v.requires_human, needs: req.items.map((i: any) => `${i.quantity} ${i.unit} ${i.need}`), created_by: r.created_by, created_at: r.created_at };
+        requires_human: v.requires_human, recipe: req.recipe ? `${req.recipe.name} × ${req.recipe.portions} portions` : null, needs: req.items.map((i: any) => `${i.quantity} ${i.unit} ${i.need}`), created_by: r.created_by, created_at: r.created_at };
     }), 200);
   });
 
@@ -279,7 +329,7 @@ export function createApp(db: DatabaseSync) {
 
   app.openapi(route('post', '/parse', 'Free text → structured purchase request (rules; asks when ambiguous)', body(z.object({
     text: z.string().min(1).max(5000),
-  }))), (c) => c.json(parseRequest(c.req.valid('json').text), 200));
+  }))), async (c) => c.json(await parseText(c.req.valid('json').text), 200));
 
   // §8.4 trust ladder: approvals in a row a human made without changing the proposal. Derived from the audit, never
   // stored; a human revision or a rejection resets it. It only suggests: the policy changes when an approver saves it.

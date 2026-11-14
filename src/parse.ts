@@ -3,6 +3,7 @@
 import { now } from './offers.ts';
 import type { Diet } from './catalogue.ts';
 import type { Priorities, Unit } from './planner.ts';
+import { llmModel, parseWithModel } from './llm.ts';
 
 const DIETS: [Diet, RegExp][] = [
   ['lactose_free', /lactose[- ]?free|laktoosit(?:on|tom)|laktosfri/i],
@@ -12,13 +13,14 @@ const DIETS: [Diet, RegExp][] = [
 ];
 // GS1 allergen codes (open question 15.3: mapping to be confirmed by Valio). "X-free", "no X", "without X", Finnish "-ton".
 const ALLERGENS: [string, string][] = [
-  ['AM', 'milk|dairy|maido|maitotuotteet|mjölk'], ['AW', 'wheat|vehnä|vete'], ['AE', 'eggs?|kananmuna|muna|ägg'],
+  ['AM', 'milk|dairy|maito|maido|maitotuotteet|mjölk'], ['AW', 'wheat|vehnä|vete'], ['AE', 'eggs?|kananmuna|muna|ägg'],
   ['AN', 'nuts?|tree nuts|pähkinä|nötter'], ['AP', 'peanuts?|maapähkinä|jordnöt'], ['AF', 'fish|kala|fisk'],
   ['AC', 'shellfish|crustaceans?|äyriäi'], ['AY', 'soy|soya|soija|soja'], ['AS', 'sesame|seesami|sesam'],
   ['BC', 'celery|selleri'], ['BM', 'mustard|sinappi|senap'],
 ];
-const free = (words: string) =>
-  new RegExp(`(?:\\b(?:${words})[- ]?free\\b|\\b(?:no|without|free of|ilman|utan)\\s+(?:${words})\\b|\\b(?:${words})[a-zäö]*?(?:t[oö]n|tt[oö]m))`, 'i'); // -ton/-tön, inflected -ttom-/-ttöm-
+const free = (words: string) => new RegExp(
+  `(?:\\b(?:${words})[- ]?free\\b|\\b(?:no|without|free of|ilman|utan)\\s+(?:${words})\\b|\\b(?:${words})[a-zäö]*?(?:t[oö]n|tt[oö]m)` // -ton/-tön, -ttom-
+  + `|\\b(?:${words})[a-zäö]*[- ]?(?:allerg|allergi)|allerg(?:y|ic|ia|isk)\\s+(?:to\\s+|mot\\s+)?(?:${words}))`, 'i'); // milk allergy, maitoallergia, allergic to nuts
 
 export function detectLimits(text: string) {
   return {
@@ -29,7 +31,7 @@ export function detectLimits(text: string) {
 
 const UNIT: [RegExp, Unit][] = [[/^(l|litres?|liters?|litraa?|ltr)$/i, 'l'], [/^(kg|kilos?|kilograms?|kiloa?)$/i, 'kg'], [/^(pcs|pieces?|kpl|units?|st)$/i, 'pcs']];
 const QTY = /(\d{1,3}(?:[ ,. ]\d{3})+|\d+(?:[.,]\d+)?)\s*(litres?|liters?|litraa?|ltr|l|kilograms?|kilos?|kiloa?|kg|pcs|pieces?|kpl|units?)\b/gi;
-const STOP = /\b(?:by|for|before|until|on|mennessä|ennen|ja|and|och|delivered|best|cheapest|please|kiitos)\b|[,.;!?]|\b\d/i;
+const STOP = /\b(?:by|for|before|until|on|mennessä|ennen|ja|and|och|delivered|best|cheapest|please|kiitos|tomorrow|today|huomenna|tänään|imorgon|morgon|idag|(?:mon|tues|wednes|thurs|fri|satur|sun)day|(?:maanan|tiis|lauan|sunnun)tai\w*|keskiviikko\w*|torstai\w*|perjantai\w*|(?:mån|tis|ons|tors|fre|lör|sön)dag\w*)\b|[,.;!?]|\b\d/i;
 const FILLER = /\b(?:of|a|an|the|some|lactose[- ]?free|gluten[- ]?free|laktoosit\w*|gluteenit\w*|vegan|vegaani\w*|vegetarian|kasvis\w*|organic)\b/gi;
 const DAYS = [/sunday|sunnuntai|söndag/i, /monday|maanantai|måndag/i, /tuesday|tiistai|tisdag/i, /wednesday|keskiviikko|onsdag/i,
   /thursday|torstai|torsdag/i, /friday|perjantai|fredag/i, /saturday|lauantai|lördag/i];
@@ -40,8 +42,10 @@ const iso = (d: Date) => d.toISOString().slice(0, 10);
 // stem only widens the match. Replace with the model's normalised need when an LLM is configured.
 const stem = (w: string) => (w.length >= 6 ? w.replace(/(?:ja|jä|ta|tä|a|ä)$/i, '') : w);
 
+const helsinkiToday = () => now().toLocaleDateString('en-CA', { timeZone: 'Europe/Helsinki' });
+
 function deliverBy(text: string): string | undefined {
-  const today = new Date(`${now().toLocaleDateString('en-CA', { timeZone: 'Europe/Helsinki' })}T12:00:00Z`);
+  const today = new Date(`${helsinkiToday()}T12:00:00Z`);
   const isoDate = text.match(/\b(\d{4}-\d{2}-\d{2})\b/);
   if (isoDate) return isoDate[1];
   const fi = text.match(/\b(\d{1,2})\.(\d{1,2})\.(\d{4})?/);
@@ -70,4 +74,67 @@ export function parseRequest(text: string) {
     : items.some((i) => !i.need) ? 'Which product do you mean?'
     : items.some((i) => !(i.quantity > 0)) ? 'The quantity must be more than zero. How much do you need?' : null;
   return { request, clarification, parser: 'rules' as const };
+}
+
+/**
+ * Rules + model (§4 job 1). The model names the product (oat bread → kauraleipä); whatever the rules found wins:
+ * quantities, units and date when they found them, and diet/allergen limits are always unioned. Model off → rules.
+ */
+export async function parseText(text: string) {
+  const rules = parseRequest(text);
+  const ai = await parseWithModel(text, helsinkiToday());
+  if (!ai) return rules;
+  const r = rules.request;
+  const items = ai.items
+    .map((it, i) => (r.items.length === ai.items.length ? { need: it.need, quantity: r.items[i].quantity, unit: r.items[i].unit } : it))
+    .filter((it) => it.need?.trim() && it.quantity > 0 && ['l', 'kg', 'pcs'].includes(it.unit))
+    .map((it) => ({ ...it, need: it.need.trim().toLowerCase() }));
+  const request = {
+    ...r, items,
+    deliver_by: r.deliver_by ?? (/^\d{4}-\d{2}-\d{2}$/.test(ai.deliver_by) ? ai.deliver_by : undefined),
+    priorities: r.priorities !== 'price_and_availability' ? r.priorities : ai.priorities ?? r.priorities,
+    diets: [...new Set([...r.diets, ...(ai.diets ?? [])])],
+    exclude_allergens: [...new Set([...r.exclude_allergens, ...(ai.exclude_allergens ?? [])])],
+  };
+  // Models sometimes read "lactose-free" as a milk allergy, which excludes all milk. A limit is never dropped
+  // (it may be a real allergy the rules missed): ask instead.
+  const milkConflict = request.diets.includes('lactose_free') && request.exclude_allergens.includes('AM') && !r.exclude_allergens.includes('AM');
+  const clarification = !items.length ? (ai.clarification || rules.clarification || 'Which product do you need, and how much?')
+    : milkConflict ? 'Lactose-free only, or must it be free of all milk (a milk allergy)? Say "milk allergy" if so.' : null;
+  return { request, clarification, parser: `rules+${llmModel()}` };
+}
+
+/** Is `q` a number the person wrote? 1,000 → 1000; 500 g → 0.5 kg and 5 dl → 0.5 l count, but only with those units. */
+export function quantityInText(text: string, q: number) {
+  const nums = [...text.matchAll(/(\d{1,3}(?:[ ,.]\d{3})+(?![.,]?\d)|\d+(?:[.,]\d+)?)\s*(g|grams?|grammaa?|ml|dl|cl)?\b/gi)].map((m) => {
+    const n = number(m[1]), u = m[2]?.toLowerCase();
+    return !u ? n : u === 'dl' ? n / 10 : u === 'cl' ? n / 100 : n / 1000;
+  });
+  return nums.some((n) => Math.abs(n - q) < 1e-9);
+}
+
+/**
+ * Read-back (trust): what the original text says vs the structured request the agent or model built from it.
+ * Deterministic, so it also checks an outside agent's interpretation. null without a source text.
+ */
+export function readBack(r: {
+  source_text?: string; items: { need: string; quantity: number; unit: Unit }[]; deliver_by: string; deliver_by_defaulted?: boolean;
+  diets: Diet[]; exclude_allergens: string[]; priorities: Priorities;
+}) {
+  const text = r.source_text;
+  if (!text) return null;
+  const rules = parseRequest(text).request;
+  const said = detectLimits(text);
+  return {
+    text,
+    items: r.items.map((it, i) => ({
+      quantity_in_text: quantityInText(text, it.quantity),
+      // The person's own words for the product, when the rules can line them up (oat bread → kauraleipä).
+      words: rules.items.length === r.items.length && rules.items[i].need !== it.need ? rules.items[i].need : null,
+    })),
+    deliver_by: r.deliver_by_defaulted ? 'assumed' : rules.deliver_by === r.deliver_by ? 'text' : 'interpreted',
+    added_limits: [...r.diets.filter((d) => !said.diets.includes(d)), ...r.exclude_allergens.filter((a) => !said.exclude_allergens.includes(a))],
+    priorities_default: rules.priorities === 'price_and_availability' && r.priorities === 'price_and_availability'
+      && !/price|hinta|pris|availab|saatav|tillgäng/i.test(text),
+  };
 }

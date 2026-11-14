@@ -1,10 +1,12 @@
 // Planner: one requested item → filtered, priced, scored options and an allocation (context.md §7, §9).
 import type { DatabaseSync } from 'node:sqlite';
-import { search, type Limits, type Product } from './catalogue.ts';
+import { getProduct, ineligibility, search, type Limits, type Product } from './catalogue.ts';
 import { checkOffers, type Offer } from './offers.ts';
+import { llmModel, matchProducts } from './llm.ts';
 
 export type Unit = 'kg' | 'l' | 'pcs';
-export type Item = { need: string; quantity: number; unit: Unit };
+/** `product`: a product the request names (a recipe's Valio product). Preferred when it is deliverable and meets the limits. */
+export type Item = { need: string; quantity: number; unit: Unit; product?: string | null };
 
 // price / availability / reliability / co2 / origin (§9.3)
 export const PRESETS = {
@@ -22,7 +24,7 @@ const DROP: Partial<Record<string, string>> = {
 
 export type Option = {
   id: string; name: string; product: Product; offer: Offer;
-  content: number; content_flag: 'content_from_price' | 'content_mismatch' | null;
+  content: number; content_flag: 'content_from_price' | 'content_mismatch' | 'litre_as_kg' | null;
   lot: number; available: number | null; late: boolean;
   unit_price_cents: number; // per l / kg / sales unit
   units_alone: number;      // sales units to cover the whole need with this option
@@ -52,7 +54,9 @@ function contentOf(p: Product, o: Offer, unit: Unit): Pick<Option, 'content' | '
   if (data && api && Math.abs(data - api) / api > 0.03) return { content: api, content_flag: 'content_mismatch' };
   if (data) return { content: data, content_flag: null };
   if (api) return { content: api, content_flag: 'content_from_price' };
-  return null;
+  // ponytail: recipes weigh liquids (1,100 kg vispikermaa); 1 l ≈ 1 kg is within a few % for dairy and juice. Flagged.
+  const asL = unit === 'kg' ? contentOf(p, o, 'l') : null;
+  return asL && { content: asL.content, content_flag: 'litre_as_kg' };
 }
 
 /** Fill from the best on-time option, split up to 3 products, late (E3) options last (§7.2). */
@@ -79,10 +83,29 @@ export async function planItem(
   priorities: Priorities = 'price_and_availability', overrides: Overrides = {},
 ) {
   const exceptions = new Set<string>();
-  const { category, matches, excluded } = search(db, item.need, limits);
+  const model = llmModel();
+  const found = search(db, item.need, limits, model ? 100 : 50);
+  const { category, excluded } = found;
   if (excluded.some((e) => e.reasons.includes('allergen data missing'))) exceptions.add('E8');
+  // §4 job 2: the model may only narrow the name matches to the requested product type, never add one.
+  let matches = found.matches;
+  // The named product is always a candidate when it meets the limits (search may not find it under the generic need).
+  const named = item.product ? getProduct(db, item.product) : null;
+  const namedBreaks = named ? ineligibility(named, limits) : [];
+  if (named && namedBreaks.length && !excluded.some((e) => e.product.id === named.id)) excluded.unshift({ product: named, reasons: namedBreaks });
+  if (named && !namedBreaks.length && !matches.some((p) => p.id === named.id)) matches = [named, ...matches];
+  const keep = model ? await matchProducts(item.need, matches.map((p) => ({ id: p.id, name: nameOf(p) }))) : null;
+  if (keep && named) keep.add(named.id); // the request named it: not the model's call
+  if (keep) {
+    // First in the list, so the first 20 shown in responses include them.
+    excluded.unshift(...matches.filter((p) => !keep.has(p.id)).map((p) => ({ product: p, reasons: [`not ${item.need} (AI product check)`] })));
+    matches = matches.filter((p) => keep.has(p.id));
+  }
+  matches = matches.slice(0, 50); // one offers call per item (§12)
   const result = {
     item, category, overrides, exceptions: [] as string[], errors: [] as string[],
+    ai_check: model ? { model, answered: !!keep, kept: matches.length } : null,
+    named: named ? { id: named.id, name: nameOf(named), used: false, why: namedBreaks.join(', ') || null as string | null } : null,
     excluded: excluded.map((e) => ({ id: e.product.id, name: nameOf(e.product), reasons: e.reasons })),
     dropped: [] as { id: string; name: string; reasons: string[]; substitutes: string[] }[],
     options: [] as Option[], allocation: [] as Part[], shortfall: item.quantity,
@@ -126,10 +149,16 @@ export async function planItem(
     d.substitutes = cands.filter(safe).slice(0, 3).map((o) => o.id);
   }
 
-  const pool = overrides.choose ? result.options.filter((o) => o.id === overrides.choose)
+  const base = overrides.choose ? result.options.filter((o) => o.id === overrides.choose)
     : overrides.confirmed_only ? result.options.filter((o) => o.available !== null) : result.options;
+  const pool = named ? [...base.filter((o) => o.id === named.id), ...base.filter((o) => o.id !== named.id)] : base;
   const { parts, shortfall } = allocate(item.quantity, pool);
   result.shortfall = shortfall;
+  if (result.named) {
+    result.named.used = parts.some((p) => p.option.id === named!.id);
+    result.named.why ??= result.named.used ? null : result.dropped.find((d) => d.id === named!.id)?.reasons.join(', ')
+      ?? (overrides.choose || overrides.confirmed_only ? 'changed by a revision' : 'not needed');
+  }
   const best = result.options.length ? Math.min(...result.options.map((o) => o.unit_price_cents)) : 0;
   const u = item.unit === 'pcs' ? 'unit' : item.unit;
   result.allocation = parts.map(({ option: o, units, covers }, i) => {
@@ -144,6 +173,7 @@ export async function planItem(
       o.available === null ? 'amount not confirmed' : `${o.available} ${o.offer.sales_unit} available`,
       `delivers ${o.offer.available_date}`,
       ...(overrides.choose ? ['chosen by user'] : overrides.confirmed_only ? ['confirmed amounts only'] : []),
+      ...(o.id === named?.id ? ['named in the request'] : []),
       ...(parts.length > 1 ? [`part ${i + 1} of ${parts.length}, covers ${+covers.toFixed(3)} of ${item.quantity} ${u}`] : []),
     ];
     return {

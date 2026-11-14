@@ -7,10 +7,13 @@ Node ≥ 23.6 (runs `.ts` directly). Dataset files go in `data/` (not in git, li
 ```sh
 npm install
 npm run db      # data/valio.db from the dataset (keeps the recorded offer cache)
+npm run recipes # online, once: 15 Valio Aimo recipes → data/recipes.json (Recipes page)
 npm test
 npm start       # gateway on :8787, OpenAPI at /openapi.json
 npm run ui      # approval UI on :5173 (proxies /api to the gateway)
 ```
+
+Optional: `GEMINI_API_KEY` in `.env` turns on the model (parsing free text, checking the product type of search hits). Without it everything runs on rules.
 
 Demo tokens (`Authorization: Bearer …`): `demo-agent`, `demo-requester`, `demo-approver`. Set `DEMO_NOW` to fix the clock.
 

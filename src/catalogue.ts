@@ -32,8 +32,10 @@ export function ineligibility(p: Product, l: Limits): string[] {
   const present = (code: string) => p.contains.includes(code) || p.may_contain.includes(code);
   if ((l.exclude_allergens?.length || l.diets?.length) && !p.has_allergen_statement) reasons.push('allergen data missing');
   for (const a of l.exclude_allergens ?? []) {
-    if (p.contains.includes(a)) reasons.push(`contains allergen ${a}`);
-    else if (p.may_contain.includes(a)) reasons.push(`may contain allergen ${a}`);
+    // Lactose (ML) is milk sugar: a product listing it contains milk even when the data omits AM (seen: goat cheese 473013).
+    const codes = a === 'AM' ? ['AM', 'ML'] : [a];
+    if (codes.some((c) => p.contains.includes(c))) reasons.push(`contains allergen ${a}`);
+    else if (codes.some((c) => p.may_contain.includes(c))) reasons.push(`may contain allergen ${a}`);
   }
   for (const d of l.diets ?? []) {
     const ok =
@@ -50,13 +52,14 @@ export function ineligibility(p: Product, l: Limits): string[] {
 
 /**
  * §7.1 step 1: full-text search over fi/en/sv names (trigram, so Finnish compounds match: maito → kevytmaitojuoma),
- * all terms first, any term as fallback. The category most hits fall into is ranked first and widened with its
- * other products (no product taxonomy exists; categories are the closest thing). Then eligibility, top `limit`.
+ * all terms first, any term as fallback. The category most hits fall into is ranked first (no product taxonomy
+ * exists; categories are the closest thing). Only name matches are returned: a category neighbour is not what was
+ * asked for (kauraleipä must never become wheat toast). Then eligibility, top `limit`.
  */
 export function search(db: DatabaseSync, text: string, limits: Limits = {}, limit = 50, pool = 200) {
   // Trigram FTS needs ≥3 chars per term; quote terms so user text cannot inject FTS syntax.
   const terms = text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((t) => t.length >= 3).map((t) => `"${t}"`);
-  if (!terms.length) return { category: null, matches: [], excluded: [] };
+  if (!terms.length) return { category: null, matches: [] as Product[], excluded: [] as { product: Product; reasons: string[] }[] };
   const fts = db.prepare(
     `SELECT p.* FROM products_fts f JOIN products p ON p.id = f.id
      WHERE products_fts MATCH ? ORDER BY bm25(products_fts), p.id LIMIT 2000`,
@@ -67,13 +70,7 @@ export function search(db: DatabaseSync, text: string, limits: Limits = {}, limi
   const votes = new Map<string, number>();
   for (const r of rows) votes.set(r.category, (votes.get(r.category) ?? 0) + 1);
   const category = [...votes].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? null;
-  if (category) {
-    const seen = new Set(rows.map((r) => r.id));
-    for (const r of db.prepare('SELECT * FROM products WHERE category = ? ORDER BY id').all(category) as any[]) {
-      if (!seen.has(r.id)) { votes.set(r.category, votes.get(r.category)! + 1); rows.push(r); }
-    }
-  }
-  // Stable sort: categories with more hits first, bm25 order inside (widened products last within their category).
+  // Stable sort: categories with more hits first, bm25 order inside.
   rows = rows.map((r, i) => ({ r, i }))
     .sort((a, b) => votes.get(b.r.category)! - votes.get(a.r.category)! || a.i - b.i)
     .slice(0, pool).map((x) => x.r);

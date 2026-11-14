@@ -3,6 +3,7 @@ import { z } from '@hono/zod-openapi';
 import type { DatabaseSync } from 'node:sqlite';
 import { getProduct, ineligibility, type Limits } from './catalogue.ts';
 import type { Part } from './planner.ts';
+import { quantityInText } from './parse.ts';
 
 export const PolicySchema = z.object({
   agent_may_finalise: z.boolean().default(false),
@@ -26,7 +27,7 @@ export function effectivePolicy(customer: Policy, limits: Partial<Policy> | null
 }
 
 export type PlannedItem = {
-  item: { need: string; quantity: number; unit: string };
+  item: { need: string; quantity: number; unit: string }; category?: string | null;
   allocation: Part[]; shortfall: number; errors: string[]; options: { unit_price_cents: number }[];
 };
 export type Rule = { rule: string; hard: boolean; ok: boolean; detail: string };
@@ -37,8 +38,16 @@ export type Verdict = { rules: Rule[]; requires_human: boolean; total_cents: num
 const ALCOHOL = /alkoholi(?!ton|holiton)/i;
 const eur = (c: number) => `€${(c / 100).toFixed(2)}`;
 
+// A quantity this many times above or below the usual one needs a human: 1000 typed for 100 is plausible text.
+const UNUSUAL = 3, MIN_HISTORY = 3;
+const median = (xs: number[]) => { const s = [...xs].sort((a, b) => a - b); return (s[(s.length - 1) >> 1] + s[s.length >> 1]) / 2; };
+
+/** `history`: quantities this customer approved before, keyed `category|unit` (see historyKey). */
+export const historyKey = (it: Pick<PlannedItem, 'category' | 'item'>) => `${it.category}|${it.item.unit}`;
+
 export function evaluate(
-  db: DatabaseSync, items: PlannedItem[], limits: Limits & { budget_eur?: number | null }, policy: Policy,
+  db: DatabaseSync, items: PlannedItem[], limits: Limits & { budget_eur?: number | null; source_text?: string }, policy: Policy,
+  history: Map<string, number[]> = new Map(),
 ): Verdict {
   try {
     const rules: Rule[] = [];
@@ -60,6 +69,19 @@ export function evaluate(
     add('on_time', true, !late.length, 'every line arrives by the requested date', `late lines go to a later delivery: ${ids(late)}`);
     const cached = items.filter((it) => it.errors.length);
     add('live_prices', true, !cached.length, 'prices and availability fetched live', `API trouble, cached offers used: ${cached.flatMap((it) => it.errors).join('; ')}`);
+    // Trust: the request must say what the person wrote, and look like what they usually order.
+    if (limits.source_text) {
+      const off = items.filter((it) => !quantityInText(limits.source_text!, it.item.quantity));
+      add('matches_request_text', true, !off.length, 'every quantity appears in the original text',
+        `not in the original text: ${off.map((it) => `${it.item.quantity} ${it.item.unit} ${it.item.need}`).join(', ')}`);
+    }
+    const odd = items.flatMap((it) => {
+      const past = history.get(historyKey(it)) ?? [];
+      if (past.length < MIN_HISTORY) return [];
+      const usual = median(past), x = it.item.quantity / usual;
+      return x >= UNUSUAL || x <= 1 / UNUSUAL ? [`${it.item.need} ${it.item.quantity} ${it.item.unit}, usually ${+usual.toFixed(3)} ${it.item.unit} (${past.length} past orders)`] : [];
+    });
+    add('usual_quantity', true, !odd.length, 'quantities in line with past orders, or too few to compare', `unusual quantity, check for a typo: ${odd.join('; ')}`);
     if (limits.budget_eur != null)
       add('request_budget', true, total <= limits.budget_eur * 100, `${eur(total)} within budget €${limits.budget_eur}`, `${eur(total)} over budget €${limits.budget_eur}`);
 

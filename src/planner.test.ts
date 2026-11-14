@@ -55,3 +55,25 @@ test('golden: 1,000 l lactose-free milk on cached offers', async () => {
     assert.ok([...p.contains, ...p.may_contain].every((a) => orig.contains.includes(a) || orig.may_contain.includes(a)));
   }
 });
+
+test('AI product check can only narrow: removals are listed, invented ids are ignored', async () => {
+  process.env.DEMO_NOW = '2026-11-14T12:00:00+0200';
+  process.env.GEMINI_API_KEY = 'test';
+  const db = openDb();
+  const f = mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+    if (!url.includes('chat/completions')) throw new Error('offline'); // Valio → recorded cache
+    const ids = JSON.parse(JSON.parse(init.body as string).messages[1].content).candidates.map((c: any) => c.id);
+    const keep = ids.filter((id: string) => id !== '464401').concat('999999'); // drop one Eila, invent one
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ matching_ids: keep }) } }] });
+  });
+  try {
+    const r = await planItem(db, { need: 'maito', quantity: 1000, unit: 'l' }, { diets: ['lactose_free'] }, '2026-11-16');
+    assert.ok(r.ai_check?.answered);
+    assert.ok(!r.options.some((o) => o.id === '464401') && !r.options.some((o) => o.id === '999999'));
+    assert.deepEqual(r.excluded.find((e) => e.id === '464401')?.reasons, ['not maito (AI product check)']);
+    assert.equal(r.allocation[0].id, '464306');
+  } finally {
+    f.mock.restore();
+    delete process.env.GEMINI_API_KEY;
+  }
+});
