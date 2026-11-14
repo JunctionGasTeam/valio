@@ -2,7 +2,7 @@
 
 An AI purchasing agent that buys food from Valio Aimo safely, openly and with the right human sign-off.
 
-Version 2.1-draft, 2026-11-14 (stack: TypeScript). Replaces v1.1 (kept as `context-v1.1-old.md`).
+Version 2.1-draft, 2026-11-14 (stack: TypeScript). Replaces v1.1 (in git history).
 Built on: the official challenge brief, the Valio Aimo dataset and mock API, organiser answers on Discord, and a read-only look at the live webshop (toimitustukku.valioaimo.fi).
 This file is the source of truth for behaviour. Change it first, then the code.
 
@@ -29,7 +29,7 @@ The wholesaler-facing part is an **open gateway**: the same functions are expose
 | Criterion | Weight | Our answer |
 |---|---|---|
 | Working end-to-end demo | 30 % | One product, no separate demo engine. Real API, with a recorded response cache as backup (section 11.3) |
-| Solving the user's need | 20 % | The brief's own example, end to end, with real data and a file that imports into the real webshop cart |
+| Solving the user's need | 20 % | The brief's own example, end to end, with real data and an order file keyed by GTIN for the webshop's cart import (column layout not yet confirmed, 15.2) |
 | Autonomy and controls | 20 % | Policy at the gateway, per-agent credentials, hard rules that cannot be switched off, trust ladder |
 | Robustness to exceptions | 15 % | Nine named exceptions, each with a defined handling (section 7) |
 | Openness and path to production | 15 % | MCP + OpenAPI, documented decision records, export into today's webshop, clear seam where an order API plugs in |
@@ -97,7 +97,7 @@ Data quality that shapes the rules:
 |---|---|---|---|
 | Owner | The one person running the customer's purchasing (one master user in the demo) | Main user (*pääkäyttäjä*) | Everything: create requests, edit proposals, approve or reject, edit the policy, grant agent credentials |
 | Agent | Any AI agent holding a gateway key | — (new) | Search, check offers, build proposals. **Never approve, never export as approved** |
-| Admin | Our team / Valio service desk | — | Kill switch per customer, read all decision records |
+| Admin | Our team / Valio service desk | — | Read all decision records (the kill switch itself is the owner's: Policy page, `PUT /agents`) |
 
 An agent key belongs to one customer and carries its own limits (section 8). Every caller sends `Authorization: Bearer <token>`; a token maps to customer, role and limits (demo tokens `demo-owner` and `demo-agent` are seeded for the demo customer). People have one role on purpose: the line that matters is person vs agent, and an agent can never approve. A customer-level switch turns all its agent keys off (kill switch). The first demo customer is a fictional hotel chain, "Hotel Kaisla", with two sites.
 
@@ -115,19 +115,19 @@ Buyer / buyer's agent ──► Gateway (MCP + REST, one codebase, TypeScript)
                             429 back-off)             policy, per-agent limits)
        └──────────────► Planner ◄────────┘                │
                          (filter, score, split)            ▼
-                              │                  Approval UI (web) ──► Export (.xlsx/.csv
+                              │                  Approval UI (web) ──► Export (.csv
                               ▼                                          for webshop import)
                      Decision record (append-only audit, human-readable)
 ```
 
-- **One implementation.** TypeScript on Node (≥ 22) end to end. REST with Hono; the OpenAPI document is generated from the same zod schemas the routes validate with (`@hono/zod-openapi`). MCP tools (`@modelcontextprotocol/sdk`) are thin wrappers over the same functions. Storage is the built-in `node:sqlite` with FTS5; tests use `node:test`. A small web UI (React + Vite) for the human side shares the zod types. No second engine in the browser.
+- **One implementation.** TypeScript on Node (≥ 23.6) end to end. REST with Hono; the OpenAPI document is generated from the same zod schemas the routes validate with (`@hono/zod-openapi`). MCP tools (`@modelcontextprotocol/sdk`) are thin wrappers over the same functions. Storage is the built-in `node:sqlite` with FTS5; tests use `node:test`. A small web UI (React + Vite) for the human side shares the zod types. No second engine in the browser.
 - **LLM** (Gemini through its OpenAI-compatible endpoint; any OpenAI-compatible endpoint by environment: `GEMINI_API_KEY`, `LLM_MODEL`, `LLM_BASE`). Jobs:
   1. **Parse** text into a `PurchaseRequest`, normalising the need to the Finnish product noun used in product names ("oat bread" → `kauraleipä`). The rules parser runs too: its diet/allergen findings are always added, and its quantities, units and date win when it found them, so a model misreading "1,000" cannot change the order.
   2. **Product-type check**: after the local search, the model sees the need and the candidate names and says which ones *are* that product. It can only **remove** candidates (each removal is listed with its reason), never add one. Substring search alone cannot tell `kauraleipä` from `kauraleipämix`.
   3. Wording the explanation from computed facts: not built; the template reason stays.
   The model never sees or decides prices, allergen/diet eligibility, quantities or policy verdicts. Model off, slow or failing → rules only, the product keeps working.
 - **Seam for production**: the order sink is one function today (`toCsv`, file export by GTIN). A real order API becomes a second sink next to it; nothing else changes. (No interface until the second implementation exists.)
-- **Text parsing today**: rules only (`src/parse.ts`: quantities, units, dates, weekdays, diets, allergens in en/fi/sv; asks when quantity or product is missing). The LLM path plugs in when the provider is decided (15.4); the keyword detector stays in front of it either way.
+- **Text parsing**: rules (`src/parse.ts`: quantities, units, dates, weekdays, diets, allergens in en/fi/sv; asks when quantity or product is missing) plus the model when a key is set; what the rules found always wins.
 
 
 ### 4b. Recipes → order
@@ -146,7 +146,7 @@ Valio Aimo publishes 2,091 professional-kitchen recipes (JSON search API `valioa
 
 | Tool / route | Who | Does |
 |---|---|---|
-| `search_products` · `GET /products/search` | agent, user | Text (fi/en/sv) + filters: free-from allergens, diets, labels, origin, category. Local data only, no API call |
+| `search_products` · `GET /products/search` | agent, user | Text (fi/en/sv) + filters: free-from allergens, diets, labels, origin. Local data only, no API call |
 | `get_product` · `GET /products/{id}` | agent, user | Static product data incl. allergens, claims, labels, CO2, reliability |
 | `check_offers` · `POST /offers` | agent, user | Price + availability for ≤ 50 ids and a date. Cached. The only route that calls the mock API |
 | `create_proposal` · `POST /proposals` | agent, user | Takes a `PurchaseRequest`, runs the planner, returns a proposal with decision record and policy verdict |
@@ -157,6 +157,7 @@ Valio Aimo publishes 2,091 professional-kitchen recipes (JSON search API `valioa
 | `POST /parse` | agent, user | Free text → `PurchaseRequest` or a clarification question |
 | `GET /proposals` | agent, user | Latest proposals of the caller's customer |
 | `GET /policy`, `PUT /policy` | owner (agents read only) | Customer policy (section 8) |
+| `GET /agents`, `PUT /agents` | owner (agents read only) | Kill switch: all agent keys of the customer on or off, effective at once, audited |
 | `GET /audit` | all | Decision records |
 
 Every response that the agent acts on carries `policy_verdict` and `requires_human: true/false`, so an outside agent can tell its user exactly what happens next.
@@ -183,7 +184,7 @@ Every response that the agent acts on carries `policy_verdict` and `requires_hum
 
 - `unit` is `kg`, `l` or `pcs` (`pcs` = sales units as sold, no content conversion). `priorities` picks a weight preset (section 9.3).
 - Diet and allergen words found by the keyword detector in `source_text` are always added, even if the model left them out. The model can add a limit, never remove one.
-- Missing date → next delivery date whose cut-off has not passed, stated in the proposal. A date in the past → clarification.
+- Missing date → tomorrow; if the offers say that is too early, the first date every item can still be ordered for (one more round of offers). Stated in the proposal as assumed. A date in the past → clarification.
 
 ---
 
@@ -221,7 +222,7 @@ Diet satisfaction:
 | E2 | Not deliverable | Empty `scheduleLines` or `salesBlock` | Option dropped; substitutes from the substitution pairs, then same category |
 | E3 | Late | `availableDate` > `deliver_by` | Offer "later date" and "substitute on time"; needs human |
 | E4 | Partial | Known `availableAmount` < needed | Split across products (7.2); if still short, shortfall stated |
-| E5 | Unknown amount | `availableAmount >= 999999` | Not sure to be delivered. Allocation uses confirmed stock first; an E5 line only fills what confirmed stock cannot, and any E5 line needs a person (hard rule `confirmed_stock`) |
+| E5 | Unknown amount | `availableAmount >= 999999` | Allowed in the best option, shown as "Delivery not confirmed". The planner also computes a **sure-delivery option** from confirmed stock only (`sure_option`: lines, cost, extra cost); one click (`confirmed_only`) switches to it. An E5 line needs a person unless the policy accepts it (`allow_unconfirmed_stock`, off by default) |
 | E6 | Cut-off passed | `closingTime` < now | Treated as not deliverable for that date; offer the next date |
 | E7 | No price | Price `error: true` or missing | Option dropped with reason |
 | E8 | Allergen data missing | No statement while a limit applies | Never in the ranking; listed so a human can check and add manually |
@@ -241,11 +242,19 @@ Before approval the gateway re-runs `check_offers` for the chosen lines. If pric
 4. Alcohol categories always need a human (licence and quota rules exist in the webshop).
 5. Every line carries a reason built from computed facts; every number in the explanation must appear in those facts, otherwise the template text is used.
 6. Ambiguous request → clarification. Policy engine error → `requires_human`.
-7. Only orders sure to be delivered: a line without stock confirmed by Valio (E5) always needs a person (`confirmed_stock`). The agent never accepts that risk on its own.
+7. *(Now a policy setting, 8.2.)* Organisers: an amount ≥ 999999 means "unknown, any quantity may be ordered", so a line without a confirmed amount (E5) is not a fixed risk. By default it still needs a person (`confirmed_stock`); the owner can accept it with `allow_unconfirmed_stock`. While it is off, an agent finishing alone switches to the sure-delivery option and keeps it only if every check passes; otherwise the person sees the best option with the sure one next to it.
 8. Plausible but wrong requests (the person typed or the agent read 1000 for 100) pass every other rule, so:
-   - `matches_request_text`: with a source text, every item quantity must be a number written in it (500 g → 0.5 kg counts). An agent that misreads, or revises a quantity later, needs a human.
+   - `matches_request_text`: with a source text, every item quantity must be a number written in it (500 g → 0.5 kg counts). An agent that misreads, or revises a quantity later, needs a human. An agent that sends no source text fails the rule too (nothing to check against); people using the form and recipes are exempt.
    - `usual_quantity`: with at least 3 approved past orders in the same category and unit, a quantity ≥ 3× or ≤ ⅓ of their median needs a human ("usually 200 l"). Demo: the 1,000 l request after five ~200 l orders.
    - Read-back: every proposal shows the original text next to the request as understood. Each field is marked from the text, assumed (date, priorities) or not in the text (quantity, added limit). Computed by rules (`readBack`), so it also checks an outside agent's interpretation.
+
+### 8.1a Confirm what was meant
+
+The path is **Ask → Agent plans → Confirm → You check → Approve → Send to webshop**. The agent plans straight from the words; the proposal then shows what it understood next to them (read-back), with a **Fix** next to every part (products and amounts, date, diets and allergies, priority; portions for recipes).
+
+- `POST /proposals/{id}/confirm`: a person says "this is what I meant" (audit `request_confirmed`). Agents cannot (403).
+- `PATCH /proposals/{id}/request`: a person corrects the request; the same proposal is planned again, every check runs again, the confirmation is cleared (audit `request_corrected`). Limits found in the words stay. A correction is a human change: it ends the trust streak.
+- Approving a `needs_review` proposal without a confirmation answers 409 `needs_confirmation`, **unless** the person has approved `TRUST_THRESHOLD` (3) proposals in a row without changes: then the step is skipped and the UI says why. Orders the agent finished within policy need no confirmation.
 
 ### 8.2 Customer policy (the owner edits)
 
@@ -256,6 +265,7 @@ Before approval the gateway re-runs `check_offers` for the chosen lines. If pric
 | `max_line_eur` | 200 | Same, per line |
 | `allow_substitutes` | false | Auto-finalise proposals that contain a substitute. *Not implemented yet: lines are matched to a need, not substituted for a named product; comes with named-product requests* |
 | `allow_split` | true | Auto-finalise split lines |
+| `allow_unconfirmed_stock` | false | Accept lines Valio reports no stock amount for (E5). Off: such a line waits for a person, with the sure-delivery option next to it |
 | `max_over_best_price_pct` | 10 | Chosen option may cost at most this much more per kg/l than the cheapest option sure to arrive (confirmed stock, on time) |
 | `weights` | preset | Scoring weights (9.3). *For now the request's `priorities` picks the preset* |
 
@@ -263,18 +273,18 @@ Per-agent key limits are a subset: an agent key can be stricter than the custome
 
 When `agent_may_finalise` is on, one more check applies: `routine_order`. The agent finishes an order alone only if every item's category and unit has at least 3 approved orders before. Trust earned on milk does not let the agent order fish.
 
-Unconfirmed stock is not a setting: an order is sure to be delivered or a person accepts the risk (`confirmed_stock`, 8.1).
+Taking the sure-delivery option the agent offered is not counted as a change for the trust ladder; any other revision is.
 
 ### 8.3 Proposal lifecycle
 
 `draft` → (`needs_review` | `auto_approved`) → `approved` → `exported`; also `rejected`, `expired` (cut-off or price validity passed).
-`auto_approved` exists only when every policy rule passed; it is still undoable until export.
+`auto_approved` exists only when every policy rule passed. A person can reject it until it is exported; the agent may export it at once, so the pop-up (8.4) is a notice, not a gate.
 
 ### 8.4 Trust ladder
 
 The gateway counts approvals in a row that a human made without changing the proposal. After **3**, it suggests letting the agent finish routine orders up to the largest approved total (rounded up to €50): *"You approved 5 proposals in a row without changing them. Let the agent finish routine orders up to €550 on its own?"*
 
-- **Learned from what was accepted**: a soft yes/no rule (today `allow_split`) that failed in *every* approval of the streak is switched on in the suggestion ("including orders split across products, as you accepted each time"). Hard rules are never learned.
+- **Learned from what was accepted**: a soft yes/no rule (`allow_split`, `allow_unconfirmed_stock`) that failed in *every* approval of the streak is switched on in the suggestion ("including orders split across products, as you accepted each time"). Hard rules are never learned.
 - **Lost at once**: a change or a rejection resets the count; rejecting an order the agent finished alone (`auto_approved`) switches `agent_may_finalise` off immediately (audit event `autonomy_revoked`).
 - **Visible**: every order the agent finishes alone pops up in the UI ("The agent finished an order on its own") until someone acknowledges it.
 
@@ -307,8 +317,7 @@ Ties: lower total cost, then product id. Weight presets (price / availability / 
 - `products` (from the JSON, flattened): id, gtin, names fi/en/sv, vendor, category, origin, sales unit, lot size, content per sales unit + unit, allergens contains/may/free (JSON), claims, labels, temperature class, co2, reliability. `products_fts` over names.
 - `substitutions` (product, substitute).
 - `offer_cache`: endpoint, product, date, response JSON, fetched_at.
-- `customers`, `sites`, `users` (role), `agent_keys` (customer, limits, revoked).
-- `customers.policy` (section 8.2, JSON), `tokens`, `proposals` (request, planned items with options, offers, allocation and verdict as JSON), `audit` (append-only, enforced by triggers; decisions are audit events).
+- `customers` (policy as JSON, section 8.2; `agents_enabled` kill switch), `tokens` (customer, role, limits, revoked), `proposals` (request, planned items with options, offers, allocation and verdict as JSON), `audit` (append-only, enforced by triggers; decisions are audit events).
 
 Money in integer cents ex-VAT; VAT rate stored per line from the API.
 
@@ -333,10 +342,10 @@ Stock products have cut-off 15 Nov 17:00; Terminal products report 12 Nov (E6).
 ### 11.2 Scenes (3 minutes)
 
 1. **Request (outside agent)**: in Claude Desktop, connected to our gateway over MCP, say the brief's sentence. The agent calls `search_products`, `check_offers`, `create_proposal`. Point: an outside agent works through an open standard. Even if the agent forgets the diet, the keyword detector adds "lactose-free" from its `source_text` (checked in the dry run).
-2. **Proposal**: open the approval UI. Only stock Valio confirms: 384 + 51 + 565 l across three Arla products, €2,580.64, every line sure to arrive. The cheaper Eila (€1.01/l) is in the comparison, marked "stock not confirmed"; the 0.5 l product is not available (E2); Terminal products dropped for a passed cut-off (E6). Each line says why.
-3. **Guardrail**: the agent tries to finalise; the gateway answers `requires_human` (over €500, and 5× the usual 200 l). The agent tells its user so.
-4. **Human**: the owner may pick Eila to save €1,570, but then "Sure to be delivered" becomes a hard check they accept themselves; they go back to the agent's pick. Approve (prices re-checked first): the "Order approved" dialog, then "Download webshop file".
-5. **Trust**: after `npm run demo:reset` (five ~200 l orders approved unchanged) the banner suggests "routine orders up to €550". Accept it; the agent orders 200 l: finished on its own, the pop-up says so. It orders 1,000 l: stopped by "Usual amount".
+2. **Proposal**: open the app. The best option: 1,000 × Valio Eila, €1,010, flagged "Delivery not confirmed"; next to it the sure-delivery option, 384 + 51 + 565 l across three Arla products, €2,580.64 (+€1,570.64). The 0.5 l product is not available (E2); Terminal products dropped for a passed cut-off (E6). Each line says why.
+3. **Guardrail**: the agent tries to finalise; the gateway answers `requires_human` (delivery guarantee, over €500, 5× the usual 200 l). The agent tells its user so.
+4. **Human**: confirm "this is what I meant" (or Fix), weigh the risk, click "Use the sure-delivery option" or keep Eila. Approve (prices re-checked first): the "Order approved" dialog, then "Download webshop file".
+5. **Trust**: after `npm run demo:reset` (five ~200 l orders, sure-delivery option taken, approved) the banner suggests "routine orders up to €550". Accept it; the agent orders 200 l: finished on its own from confirmed stock (Arla, €496), the pop-up says so. It orders 1,000 l: waits for a person ("Usual amount"). With "Accept products without a confirmed stock amount" switched on in Policy, the same 200 l goes to the cheapest product (Valio Eila, about €202) instead.
 6. *(optional)* **Recipe**: Recipes → a soup → 120 portions → Plan order. Every line traced to the recipe, Valio products named in the recipe used first, a passed cut-off shown on its line.
 7. **Path to production**: show the file and the decision record; one line on importing it into today's webshop cart ("Tuo tiedostosta") and where the order API would plug in. Trust ladder banner as the closing line.
 
@@ -353,7 +362,7 @@ Stock products have cut-off 15 Nov 17:00; Terminal products report 12 Nov (E6).
 ## 12. Non-functional
 
 - Secrets (`VALIO_API_KEY`, LLM key) only from environment; `.env.example` in the repo.
-- API politeness: shortlist only, ≤ 50 ids per call, client throttle 5 calls/s, 429 → 30 s wait.
+- API politeness: shortlist only, ≤ 50 ids per call, at most three items planned at a time (two calls each), 429 → 30 s wait and one retry.
 - Every query filtered by the caller's customer. Agent keys revocable; admin kill switch.
 - Product search < 100 ms; proposal for one item < 3 s with a warm cache.
 - The dataset licence allows use for Junction 2026 only. Do not publish it.
@@ -363,7 +372,7 @@ Stock products have cut-off 15 Nov 17:00; Terminal products report 12 Nov (E6).
 ## 13. Tests (definition of done)
 
 1. Diet/allergen property test over the whole catalogue: no proposal line ever violates the limits.
-2. Golden test: the milk request on cached responses gives the expected shortlist, exceptions E2, E6, a stable ranking, and an allocation from confirmed stock only (384 + 51 + 565 l).
+2. Golden test: the milk request on cached responses gives the expected shortlist, exceptions E2, E5, E6, a stable ranking, the best option (1,000 × Eila, E5) and the sure-delivery option (384 + 51 + 565 l from confirmed stock).
 3. Quantity: lot size 0.01 → 1; content from price and content mismatch flagged; split never exceeds known amounts.
 4. Policy: each rule at and over its limit; agent key cannot call `decide` (403) and gets no MCP tool for it; alcohol always human.
 5. Re-validation: changed cached price → `needs_review` with the difference.
@@ -374,24 +383,9 @@ Manual: all scenes twice, once with the model off.
 
 ---
 
-## 14. Team split and timeline (48 h)
+## 14. (removed)
 
-| Role | Owns |
-|---|---|
-| A · Planner | Data loader, filters, diet rules, scoring, allocation, exceptions, golden test |
-| B · Gateway | Hono routes, MCP server, offer client + cache + 429, policy engine, audit, export |
-| C · UI | Approval UI: proposal view, alternatives, decision, policy editor, decision timeline, trust banner |
-| D · Agent + pitch | LLM parse/explain + fallback, Claude Desktop MCP setup, demo script, rehearsal |
-
-| Hours | Milestone |
-|---|---|
-| 0–6 | Data loader + offer client with cache; request schema frozen; MCP "hello" from Claude Desktop |
-| 6–20 | Milk request end to end through REST, no UI |
-| 20–32 | Approval UI, policy, export; MCP tools complete |
-| 32–42 | Exceptions polish, trust ladder, record the cache, two dry runs |
-| 42–48 | Pitch rehearsal |
-
-Cut order if late: trust ladder banner → sustainability preset → LLM explanation (template stays) → second site.
+Team split and timeline: planning notes, not behaviour. See git history.
 
 ---
 
@@ -400,6 +394,7 @@ Cut order if late: trust ladder banner → sustainability preset → LLM explana
 1. Terminal products return a `closingTime` in the past for a future `availableDate`. Can they be ordered for that date or not? (Ask organisers. Until then: E6.) **High impact:** whole product groups disappear, e.g. 12 of 14 oat breads (all Terminal, cut-off 12 Nov 12:30, available 16 Nov).
 2. Exact webshop import file format. Get it by exporting a cart with "Vie Exceliin" and importing a test file into an empty cart at the booth.
 3. Is the GS1 allergen code mapping (AM milk, AW gluten, ML lactose, …) confirmed by Valio for this dataset?
-4. Hosted LLM allowed for the demo, or local only? (We use Gemini; request text and product names are sent to Google. Confirm with organisers.)
-6. May we use Valio Aimo's public recipes (§4b) in the demo? We keep 15 locally, fetched once, not published.
+4. Hosted LLM allowed for the demo, or local only? (We use Gemini; request text and product names are sent to Google. Voice input on the New order page uses the browser's speech recognition; in Chrome the audio goes to Google too. Confirm with organisers.)
 5. Team size, pitch slot and whether judging happens before Sunday 17:00 (the stock cut-off in the mock data).
+6. May we use Valio Aimo's public recipes (§4b) in the demo? We keep 15 locally, fetched once, not published.
+7. Does "amount unknown" (≥ 999999) carry any real risk of non-delivery? Decides the default of `allow_unconfirmed_stock`.

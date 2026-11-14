@@ -1,4 +1,17 @@
-Valo Aimo Challenge — Trusted Trade Agents. Spec: [context.md](context.md).
+# Trusted Trade Agents
+
+Valio Aimo challenge, Junction 2026. An open gateway (MCP + REST/OpenAPI) that lets any AI purchasing agent buy food from Valio Aimo: it turns a request ("1,000 litres of lactose-free milk by Monday") into an order proposal with real products, fixed prices, sales units and a reason per line. A policy in the gateway, not in the agent, decides whether the agent may finish the order or a person signs off. Full spec: [context.md](context.md).
+
+| Brief | Where |
+|---|---|
+| Lookup | Local full-text search over the product data, then one price and one availability call for a shortlist of ≤ 50 (`src/catalogue.ts`, `src/offers.ts`) |
+| Request and order | Free text, form, recipe or an outside agent → the same planner; prices frozen and re-checked at approval; CSV order file by GTIN (`src/planner.ts`, `src/api.ts`) |
+| Permissions and approval | Agents can never approve; hard rules no setting changes; owner policy, kill switch, trust ladder (`src/policy.ts`) |
+| More than price | Delivery reliability, CO2 and origin in the score |
+| Exceptions | E1–E9: no match, not deliverable, late, partial, unknown amount, cut-off passed, no price, allergen data missing, API trouble |
+| Explain decisions | Reason per line, read-back of the request, append-only decision record (`GET /audit`) |
+
+Known limits: no order API exists, so the result is an approved order file (its column layout is not yet confirmed against the webshop import); demo tokens are fixed strings.
 
 ## Run
 

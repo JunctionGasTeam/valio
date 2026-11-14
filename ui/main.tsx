@@ -16,7 +16,7 @@ const FLAGS: Record<string, { label: string; tone: Tone; help: string }> = {
   E2: { label: 'Some can’t be delivered', tone: 'neutral', help: 'Valio cannot deliver some matching products. They were left out; similar ones are suggested.' },
   E3: { label: 'Arrives late', tone: 'warn', help: 'Arrives after your date, so it would come in a separate, later delivery.' },
   E4: { label: 'Split across products', tone: 'info', help: 'One product alone does not cover the quantity, so it is split across up to three.' },
-  E5: { label: 'Stock not confirmed', tone: 'warn', help: 'Valio does not confirm stock for this product, so delivery is not guaranteed. The agent never picks it on its own; only a person can accept it.' },
+  E5: { label: 'Delivery not confirmed', tone: 'warn', help: 'Valio accepts the order but does not confirm stock for this product. It will most likely arrive, but it is not guaranteed.' },
   E6: { label: 'Some order deadlines passed', tone: 'neutral', help: 'For some products the order deadline for this date has passed. They were left out.' },
   E7: { label: 'Some without price', tone: 'neutral', help: 'Valio returned no price for some products. They were left out.' },
   E8: { label: 'Allergen info missing', tone: 'neutral', help: 'Some products have no allergen information. With your limits they were left out, to be safe.' },
@@ -39,7 +39,7 @@ const RULES: Record<string, { label: string; why: string; fix?: string }> = {
   agent_may_finalise: { label: 'Who signs off', why: 'Your policy says a person signs off every order.', fix: 'You can let the agent finish small, routine orders in Policy.' },
   max_order_eur: { label: 'Order limit', why: 'Orders above this total need a person, by your policy.', fix: 'Change the limit in Policy.' },
   max_line_eur: { label: 'Line limit', why: 'A single line above this amount needs a person, by your policy.', fix: 'Change the limit in Policy.' },
-  confirmed_stock: { label: 'Sure to be delivered', why: 'Every line must have stock Valio confirms. A line without it may not arrive, so only a person can accept it.', fix: 'Go back to the agent’s pick, which uses confirmed stock, or accept the risk yourself.' },
+  confirmed_stock: { label: 'Delivery guarantee', why: 'Valio reports no stock amount for a line: it can be ordered and will most likely arrive, but the amount is not confirmed. Your policy asks you to look.', fix: 'Use the sure-delivery option on the item, accept it yourself, or allow it in Policy.' },
   routine_order: { label: 'Routine order', why: 'The agent finishes orders on its own only for products this kitchen has ordered and approved at least 3 times.', fix: 'Approve it yourself; after 3 approvals, similar orders can go through on their own.' },
   allow_split: { label: 'Splitting', why: 'An item is split across products, and your policy wants a person to see that.' },
   max_over_best_price_pct: { label: 'Price vs. cheapest', why: 'A line costs more per litre or kilo than the cheapest suitable product, by more than your policy allows.', fix: 'Choose the cheaper option, or accept the price.' },
@@ -52,10 +52,10 @@ const STATUS: Record<string, { label: string; tone: Tone }> = {
   rejected: { label: 'Rejected', tone: 'bad' }, expired: { label: 'Expired', tone: 'bad' },
 };
 const CRITERIA = [['price', 'Price'], ['availability', 'Stock'], ['reliability', 'Reliability'], ['co2', 'CO₂'], ['origin', 'Finnish']] as const;
+// Two requests that show the product well: the brief's own milk sentence, and cheese with a sure-delivery option.
 const EXAMPLES = [
-  'I need 1,000 litres of lactose-free milk by Monday, best on price and availability.',
-  'Tarvitsen 200 l laktoositonta maitoa huomenna',
-  '300 l lactose-free milk by Wednesday, sustainability first',
+  { icon: 'milk', title: 'Milk for the week', text: 'I need 1,000 litres of lactose-free milk by Monday, best on price and availability.' },
+  { icon: 'cheese', title: 'Cheese for pizza night', text: '20 kg of grated cheese for pizza by Wednesday' },
 ];
 const DIETS = [['lactose_free', 'Lactose-free'], ['gluten_free', 'Gluten-free'], ['vegan', 'Vegan'], ['vegetarian', 'Vegetarian']] as const;
 const GS1: Record<string, string> = { AM: 'milk', AW: 'gluten', AE: 'egg', AN: 'tree nuts', AP: 'peanuts', AF: 'fish', AC: 'crustaceans', AY: 'soy', AS: 'sesame', BC: 'celery', BM: 'mustard', AU: 'sulphites', NL: 'lupin', UM: 'molluscs' };
@@ -133,6 +133,10 @@ const PATHS: Record<string, string> = {
   external: 'M14 4h6v6m0-6L10 14M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5', loader: 'M12 3a9 9 0 1 0 9 9',
   text: 'M4 6h16M4 12h16M4 18h10', edit: 'M4 20h4L19 9l-4-4L4 16v4Zm9-13 4 4', info: 'M12 16v-5m0-3h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z',
   refresh: 'M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7',
+  mic: 'M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Zm7 9a7 7 0 0 1-14 0m7 7v3', stop: 'M7 7h10v10H7z',
+  milk: 'M9 2h6M9 2v3L7 8v12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V8l-2-3V2M7 12h10',
+  cheese: 'M3 18V11.5L15 5l6 6.5V18Zm0-6.5h18M8 15h.01M13 14.5h.01M17 15.5h.01',
+  globe: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm-9-9h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9Z',
 };
 function Icon({ name, size = 16, className }: { name: string; size?: number; className?: string }) {
   return (
@@ -360,25 +364,47 @@ function TrustBanner({ token }: { token: string }) {
 
 // ---------- The path ----------
 type StepState = 'done' | 'now' | 'next' | 'stop';
-function Steps({ p, open }: { p: any; open: number }) {
-  const s = p.status;
-  const steps: { label: string; note?: string; state: StepState }[] = [
-    { label: 'Ask', note: p.request.recipe ? 'from a recipe' : p.request.source_text ? 'in your words' : 'by form or agent', state: 'done' },
-    { label: 'Agent plans', note: plural(p.items.reduce((n: number, it: any) => n + it.allocation.length, 0), 'line'), state: 'done' },
-    { label: 'You check', note: s === 'needs_review' ? `${open} need${open === 1 ? 's' : ''} you` : 'all clear', state: s === 'needs_review' ? 'now' : 'done' },
-    { label: 'Approve', note: s === 'rejected' ? 'rejected' : s === 'expired' ? 'expired' : s === 'auto_approved' ? 'by the agent, within policy' : s === 'needs_review' ? 'prices re-checked first' : 'approved',
-      state: ['rejected', 'expired'].includes(s) ? 'stop' : s === 'needs_review' ? 'next' : 'done' },
-    { label: 'Send to webshop', note: s === 'exported' ? 'file downloaded' : 'import file', state: s === 'exported' ? 'done' : ['approved', 'auto_approved'].includes(s) ? 'now' : 'next' },
+type Step = { state: StepState; note?: string };
+// The one path every order takes. Every screen of it shows the same band with the same steps.
+const PATH = ['Ask', 'Agent plans', 'Confirm', 'You check', 'Approve', 'Send to webshop'];
+const NOTES = ['what you need', 'products, prices, stock', 'is this what you meant?', 'checks and limits', 'prices re-checked first', 'import file'];
+/** Before a proposal exists: `at` = 0 asking, 1 the agent is planning. */
+const earlySteps = (at: number, notes: Partial<Record<number, string>> = {}): Step[] =>
+  PATH.map((_, i) => ({ state: i < at ? 'done' : i === at ? 'now' : 'next', note: notes[i] ?? NOTES[i] }));
+function proposalSteps(p: any, open: number): Step[] {
+  const s = p.status, r = p.request, c = p.confirmation;
+  return [
+    { state: 'done', note: r.recipe ? 'a recipe' : r.source_text ? 'in your words' : 'by form or agent' },
+    { state: 'done', note: plural(p.items.reduce((n: number, it: any) => n + it.allocation.length, 0), 'line') },
+    { state: c.required ? 'now' : 'done', note: c.required ? 'is this what you meant?' : c.done ? 'you confirmed' : c.skipped_by_trust ? 'skipped: trusted' : 'not needed' },
+    { state: s === 'needs_review' ? (c.required ? 'next' : 'now') : 'done', note: s !== 'needs_review' || !open ? 'all clear' : `${open} thing${open === 1 ? '' : 's'} to look at` },
+    { state: ['rejected', 'expired'].includes(s) ? 'stop' : s === 'needs_review' ? 'next' : 'done',
+      note: s === 'rejected' ? 'rejected' : s === 'expired' ? 'expired' : s === 'auto_approved' ? 'by the agent, within policy' : s === 'needs_review' ? NOTES[4] : 'approved' },
+    { state: s === 'exported' ? 'done' : ['approved', 'auto_approved'].includes(s) ? 'now' : 'next', note: s === 'exported' ? 'file downloaded' : NOTES[5] },
   ];
+}
+function Steps({ steps }: { steps: Step[] }) {
   return (
     <ol className="steps" aria-label="Order progress">
       {steps.map((x, i) => (
-        <li key={x.label} className={`step ${x.state}`} aria-current={x.state === 'now' ? 'step' : undefined}>
+        <li key={PATH[i]} className={`step ${x.state}`} aria-current={x.state === 'now' ? 'step' : undefined}>
           <span className="step-dot" aria-hidden="true">{x.state === 'done' ? <Icon name="check" size={14} /> : x.state === 'stop' ? <Icon name="x" size={14} /> : i + 1}</span>
-          <span className="step-text"><strong>{x.label}</strong><span>{x.note}</span></span>
+          <span className="step-text"><strong>{PATH[i]}</strong><span>{x.note}</span></span>
         </li>
       ))}
     </ol>
+  );
+}
+function Band({ back, title, meta, steps }: { back: [string, string]; title: string; meta?: ReactNode; steps: Step[] }) {
+  return (
+    <section className="band">
+      <div className="wrap">
+        <a href={back[0]} className="back"><Icon name="back" />{back[1]}</a>
+        <h1>{title}</h1>
+        {meta && <p className="band-meta">{meta}</p>}
+        <Steps steps={steps} />
+      </div>
+    </section>
   );
 }
 
@@ -402,6 +428,11 @@ function Proposal({ id, token }: { id: string; token: string }) {
     return ok;
   };
   const exportFile = async () => { if (await act('export', () => download(token, id))) setDone('sent'); };
+  const fx: Fixes = {
+    confirm: () => { act('confirm', () => api(token, 'POST', `/proposals/${id}/confirm`), 'Confirmed. Now check the order and approve it.'); },
+    correct: (fix) => act('correct', () => api(token, 'PATCH', `/proposals/${id}/request`, fix), 'Corrected. The agent planned the order again.'),
+    busy: !!busy, open: false,
+  };
   const revise = (item: number, rev: object) => act('revise', () => api(token, 'PATCH', `/proposals/${id}`, { item, ...rev }), 'Updated. Every check ran again.');
   const decide = (decision: 'approve' | 'reject') => {
     if (decision === 'reject' && !confirm('Reject this proposal? Nothing will be ordered.')) return;
@@ -416,18 +447,11 @@ function Proposal({ id, token }: { id: string; token: string }) {
   const title = rc ? `${rc.name} for ${num(rc.portions)}` : p.items.map((it: any) => `${num(it.item.quantity)} ${unitLabel(it.item.unit)} ${it.item.need}`).join(', ');
   return (
     <>
-      <section className="band">
-        <div className="wrap">
-          <a href="#" className="back"><Icon name="back" />All orders</a>
-          <h1>{title}</h1>
-          <p className="band-meta">
-            <span><Icon name="truck" size={15} />Deliver by {day(p.deliver_by)}{p.deliver_by_defaulted && ' (next delivery day, none was given)'}</span>
-            <span><Icon name="pin" size={15} />{p.site}</span>
-            <span><Icon name="user" size={15} />Asked by {who(p.created_by)}, {ago(p.created_at)}</span>
-          </p>
-          <Steps p={p} open={failed.length} />
-        </div>
-      </section>
+      <Band back={['#', 'All orders']} title={title} steps={proposalSteps(p, issuesOf(p, failed, new Map()).length)} meta={<>
+        <span><Icon name="truck" size={15} />Deliver by {day(p.deliver_by)}{p.deliver_by_defaulted && ' (next delivery day, none was given)'}</span>
+        <span><Icon name="pin" size={15} />{p.site}</span>
+        <span><Icon name="user" size={15} />Asked by {who(p.created_by)}, {ago(p.created_at)}</span>
+      </>} />
 
       <div className="wrap page proposal-grid">
         <div className="main-col">
@@ -438,15 +462,17 @@ function Proposal({ id, token }: { id: string; token: string }) {
               <p>The lines below show the new situation. Look them over and approve again.</p>
             </Callout>
           )}
-          <ReadBack p={p} />
+          <ReadBack p={p} fx={{ ...fx, open }} />
           <h2 className="section-title">The order</h2>
           {p.items.map((it: any, i: number) => <Item key={i} it={it} from={rc?.from[i]} open={open} busy={!!busy} revise={(rev) => revise(i, rev)} />)}
           <Timeline events={events} />
         </div>
 
         <aside className="rail" aria-label="Your decision">
-          <Decision p={p} failed={failed} busy={busy} note={note} setNote={setNote}
-            decide={decide} exportFile={exportFile} />
+          <Decision p={p} failed={failed} busy={busy} note={note} setNote={setNote} decide={decide} exportFile={exportFile}
+            useSure={open && p.items.some((it: any) => it.sure_option) ? () => act('revise', async () => {
+              for (const [i, it] of p.items.entries()) if (it.sure_option) await api(token, 'PATCH', `/proposals/${id}`, { item: i, confirmed_only: true });
+            }, 'Switched to sure delivery. Every check ran again.') : undefined} />
         </aside>
       </div>
 
@@ -475,16 +501,90 @@ function Proposal({ id, token }: { id: string; token: string }) {
   );
 }
 
-function Decision({ p, failed, busy, note, setNote, decide, exportFile }: {
-  p: any; failed: any[]; busy: string | null; note: string; setNote: (s: string) => void;
-  decide: (d: 'approve' | 'reject') => void; exportFile: () => void;
-}) {
-  const s = p.status;
-  const hard = failed.filter((r) => r.hard), soft = failed.filter((r) => !r.hard);
-  const passed = p.policy_verdict.rules.filter((r: any) => r.ok);
-  const lines = p.items.reduce((n: number, it: any) => n + it.allocation.length, 0);
-  const names = new Map<string, string>(p.items.flatMap((it: any) => it.allocation.map((a: any) => [a.id, a.name])));
-  const Rule = ({ r, tone, icon }: { r: any; tone: Tone; icon: string }) => (
+// The checks a person must look at, in plain words, with what to do about each. Built from the verdict and the
+// proposal itself; "Who signs off" is not a problem with an order, so it is a footnote, not a card.
+type Issue = { key: string; fixed: boolean; tone: Tone; icon: string; title: string; text: string; why: string; action?: { label: string; run?: () => void; href?: string } };
+const toRequest = () => document.getElementById('understood')?.scrollIntoView({ behavior: 'smooth' });
+function issuesOf(p: any, failed: any[], names: Map<string, string>, useSure?: () => void): Issue[] {
+  const by = new Map(failed.map((r) => [r.rule, r]));
+  const list = (ids: string) => named(ids, names).split(', ').join(', ');
+  const out: Issue[] = [];
+  const why = (k: string) => RULES[k]?.why ?? '';
+  const fixed = (k: string, title: string, text: string, icon = 'lock', action?: Issue['action'], tone: Tone = 'bad') =>
+    out.push({ key: k, fixed: true, tone, icon, title, text, why: why(k), action });
+  for (const r of failed.filter((x) => x.hard)) {
+    const d: string = r.detail;
+    if (r.rule === 'usual_quantity') {
+      const m = d.match(/: (.+?) ([\d.]+) (\w+), usually ([\d.]+) \w+ \((\d+) past orders\)/);
+      if (m) {
+        const [, need, q, u, usual, n] = m, x = +q / +usual;
+        fixed(r.rule, x >= 1 ? `${num(+q)} ${u} is ${Math.round(x)}× your usual amount` : `${num(+q)} ${u} is far below your usual amount`,
+          `You usually order about ${num(+usual)} ${u} of ${need} (${n} past orders). Is it a typo?`, 'alert', { label: 'Check the amount', run: toRequest }, 'warn');
+      } else fixed(r.rule, 'Unusual amount', d, 'alert', { label: 'Check the amount', run: toRequest }, 'warn');
+    } else if (r.rule === 'matches_request_text') {
+      fixed(r.rule, 'An amount is not in your words', `Your request does not say ${d.replace(/^not in the original text: /, '')}. Check it is what you meant.`, 'alert', { label: 'Check the amount', run: toRequest }, 'warn');
+    } else if (r.rule === 'need_covered') {
+      const parts = d.split('; ').map((x) => x.replace(/: ([\d.]+) of [\d.]+ (\w+) not covered/, ' ($1 $2)'));
+      fixed(r.rule, 'Part of the order cannot be delivered', `Nothing can be delivered for ${parts.join(', ')} by this date.`, 'alert', { label: 'Try another date', run: toRequest });
+    } else if (r.rule === 'on_time') {
+      fixed(r.rule, 'Some lines arrive late', `${list(d.replace(/^late lines go to a later delivery: /, ''))} would come in a later delivery.`, 'truck', undefined, 'warn');
+    } else if (r.rule === 'live_prices') {
+      fixed(r.rule, 'Prices are from earlier', 'Valio’s price service did not answer, so saved prices are shown. Approving checks them again.', 'alert', undefined, 'warn');
+    } else if (r.rule === 'allergen_and_diet_limits') {
+      fixed(r.rule, 'A product breaks your diet or allergy limits', `${list(d.replace(/^lines break the limits: /, ''))}. Choose another product.`);
+    } else if (r.rule === 'alcohol_needs_human') {
+      fixed(r.rule, 'Alcohol always needs your OK', `${list(d.replace(/^alcohol lines always need a human: /, ''))}.`);
+    } else fixed(r.rule, RULES[r.rule]?.label ?? r.rule, named(d, names));
+  }
+  // Spending limits: one card for the order and line limits together.
+  const order = by.get('max_order_eur'), line = by.get('max_line_eur');
+  if (order || line) {
+    const ol = order?.detail.match(/> €(\d+)/)?.[1], ll = line?.detail.match(/over €(\d+)/)?.[1];
+    const lineCount = line ? line.detail.replace(/^lines over €\d+: /, '').split(', ').length : 0;
+    out.push({ key: 'money', fixed: false, tone: 'warn', icon: 'alert', title: 'Over your spending limits',
+      text: [order && `This order is ${eur(p.total_cents)}; your order limit is €${ol}.`, line && `${lineCount === 1 ? 'One line is' : `${lineCount} lines are`} over your €${ll} line limit.`].filter(Boolean).join(' '),
+      why: 'You set these limits. Anything above them waits for you, so a large order never goes through unnoticed.', action: { label: 'Change limits', href: '#/policy' } });
+  }
+  const stock = by.get('confirmed_stock'); // a policy setting (off by default), not a fixed rule
+  if (stock) {
+    const risky = p.items.filter((it: any) => it.sure_option);
+    const extra = risky.reduce((sum: number, it: any) => sum + it.sure_option.extra_cents, 0);
+    out.push({ key: 'confirmed_stock', fixed: false, tone: 'warn', icon: 'truck', title: 'Delivery is not confirmed',
+      text: `Valio reports no stock amount for ${list(stock.detail.replace(/^stock not confirmed: /, ''))}. It will most likely arrive.`
+        + (risky.length ? ` A sure-delivery option costs ${eur(extra)} more.` : ''),
+      why: why('confirmed_stock'), action: risky.length && useSure ? { label: 'Use sure delivery', run: useSure } : { label: 'Change in Policy', href: '#/policy' } });
+  }
+  const soft = (k: string, title: string, text: string, action?: Issue['action']) => { if (by.has(k)) out.push({ key: k, fixed: false, tone: 'warn', icon: 'alert', title, text, why: why(k), action }); };
+  const pct = by.get('max_over_best_price_pct')?.detail.match(/more than (\d+) %/)?.[1];
+  soft('max_over_best_price_pct', 'Pricier than the cheapest option', `${list((by.get('max_over_best_price_pct')?.detail ?? '').replace(/^.*?: /, ''))}: more than ${pct} % above the cheapest option with confirmed stock.`);
+  soft('allow_split', 'Split across products', 'One product does not cover the amount, so the item is split. Your policy asks you to look.', { label: 'Change in Policy', href: '#/policy' });
+  soft('routine_order', 'New for the agent', `${(by.get('routine_order')?.detail ?? '').replace(/^.*?: /, '')}: the agent finishes an order alone only after you have approved it 3 times.`);
+  for (const r of failed.filter((x) => !x.hard && !['max_order_eur', 'max_line_eur', 'max_over_best_price_pct', 'allow_split', 'routine_order', 'agent_may_finalise', 'confirmed_stock'].includes(x.rule)))
+    out.push({ key: r.rule, fixed: false, tone: 'warn', icon: 'alert', title: RULES[r.rule]?.label ?? r.rule, text: named(r.detail, names), why: why(r.rule) });
+  return out;
+}
+function IssueCard({ x, busy }: { x: Issue; busy: boolean }) {
+  return (
+    <li className={`issue tone-${x.tone}`}>
+      <div className="issue-head">
+        <Icon name={x.icon} />
+        <strong>{x.title}</strong>
+        <span className="issue-tag">{x.fixed ? <><Icon name="lock" size={11} />Fixed rule</> : 'Your limit'}</span>
+      </div>
+      <p>{x.text}</p>
+      <div className="issue-foot">
+        {x.action?.run && <button className="btn sm" disabled={busy} onClick={x.action.run}>{x.action.label}</button>}
+        {x.action?.href && <a className="btn sm" href={x.action.href}>{x.action.label}</a>}
+        <details><summary>Why?</summary><p>{x.why}</p></details>
+      </div>
+    </li>
+  );
+}
+
+// Top-level on purpose: a component declared inside another is a new type on every render, so React remounts it
+// and an open "Why this check" closes whenever the page polls (every 5 s).
+function RuleRow({ r, tone, icon, names }: { r: any; tone: Tone; icon: string; names: Map<string, string> }) {
+  return (
     <li className={`rule tone-${tone}`}>
       <Icon name={icon} />
       <div>
@@ -500,6 +600,18 @@ function Decision({ p, failed, busy, note, setNote, decide, exportFile }: {
       </div>
     </li>
   );
+}
+
+function Decision({ p, failed, busy, note, setNote, decide, exportFile, useSure }: {
+  p: any; failed: any[]; busy: string | null; note: string; setNote: (s: string) => void;
+  decide: (d: 'approve' | 'reject') => void; exportFile: () => void; useSure?: () => void;
+}) {
+  const s = p.status;
+  const passed = p.policy_verdict.rules.filter((r: any) => r.ok);
+  const lines = p.items.reduce((n: number, it: any) => n + it.allocation.length, 0);
+  const names = new Map<string, string>(p.items.flatMap((it: any) => it.allocation.map((a: any) => [a.id, a.name])));
+  const issues = issuesOf(p, failed, names, useSure);
+  const signs = failed.some((r) => r.rule === 'agent_may_finalise');
   return (
     <section className="decision">
       <div className="decision-top">
@@ -509,22 +621,16 @@ function Decision({ p, failed, busy, note, setNote, decide, exportFile }: {
       </div>
 
       <div className="decision-checks">
-        {s === 'needs_review' && <h2>{failed.length} check{failed.length === 1 ? '' : 's'} need{failed.length === 1 ? 's' : ''} a person</h2>}
+        {s === 'needs_review' && <>
+          <h2>{issues.length ? `Look at ${issues.length === 1 ? 'one thing' : `${issues.length} things`} before you approve` : 'Nothing looks off'}</h2>
+          {!!issues.length && <ul className="issues">{issues.map((x) => <IssueCard key={x.key} x={x} busy={!!busy} />)}</ul>}
+          {signs && <p className="signs"><Icon name="user" size={14} /><span>You sign off every order yourself. That is your policy, not a problem with this order. <a href="#/policy">Policy</a></span></p>}
+        </>}
         {s === 'auto_approved' && <><h2>Finished by the agent</h2><p className="muted small">Every check passed and the order is routine, so your policy let the agent finish it.</p></>}
-        {!!hard.length && <>
-          <h3><Icon name="lock" size={14} />Always checked by a person</h3>
-          <p className="muted small">Fixed rules. No setting turns them off.</p>
-          <ul className="rules">{hard.map((r) => <Rule key={r.rule} r={r} tone="bad" icon="lock" />)}</ul>
-        </>}
-        {!!soft.length && <>
-          <h3><Icon name="alert" size={14} />Needs your OK under your policy</h3>
-          <p className="muted small">Limits you set. You can change them in <a href="#/policy">Policy</a>.</p>
-          <ul className="rules">{soft.map((r) => <Rule key={r.rule} r={r} tone="warn" icon="alert" />)}</ul>
-        </>}
         {!!passed.length && (
           <details className="passed">
             <summary><Icon name="check" size={14} />{passed.length} checks passed</summary>
-            <ul className="rules">{passed.map((r: any) => <Rule key={r.rule} r={r} tone="ok" icon="check" />)}</ul>
+            <ul className="rules">{passed.map((r: any) => <RuleRow key={r.rule} r={r} tone="ok" icon="check" names={names} />)}</ul>
           </details>
         )}
       </div>
@@ -533,7 +639,10 @@ function Decision({ p, failed, busy, note, setNote, decide, exportFile }: {
         {s === 'needs_review' && <>
           <label htmlFor="note">Note for the record <span className="muted">(optional)</span></label>
           <textarea id="note" rows={2} value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} placeholder="e.g. checked the amount with the kitchen" />
-          <button className="btn lime block" disabled={!!busy} aria-busy={busy === 'approve'} onClick={() => decide('approve')}>
+          {p.confirmation.required && (
+            <p className="locked-note"><Icon name="lock" size={14} /><span>First confirm the request is what you meant. <a href="#understood" onClick={(e) => { e.preventDefault(); document.getElementById('understood')?.scrollIntoView({ behavior: 'smooth' }); }}>Go to the request</a></span></p>
+          )}
+          <button className="btn lime block" disabled={!!busy || p.confirmation.required} aria-busy={busy === 'approve'} onClick={() => decide('approve')}>
             {busy === 'approve' ? <><Icon name="loader" className="spin" />Re-checking prices with Valio…</> : <><Icon name="check" />Approve order</>}
           </button>
           <p className="act-note">Approving first re-checks every price and stock level with Valio. If anything changed, nothing is approved and you see what changed.</p>
@@ -557,65 +666,158 @@ function Decision({ p, failed, busy, note, setNote, decide, exportFile }: {
   );
 }
 
-// Read-back: the request as understood, next to the person's own words. Anything not in their text is called out.
-function ReadBack({ p }: { p: any }) {
-  const rb = p.read_back, r = p.request;
-  if (r.recipe) return <RecipeReadBack p={p} />;
-  const limits = [...r.diets, ...r.exclude_allergens];
-  if (!rb) return (
-    <section className="panel understood">
-      <h2>What was asked</h2>
-      <p className="muted">Entered as a form or by an agent, so there are no original words to compare with.</p>
-      <ul className="facts">
-        {r.items.map((it: any, i: number) => <li key={i}><Icon name="check" />{num(it.quantity)} {unitLabel(it.unit)} {it.need}</li>)}
-        {limits.map((k: string) => <li key={k}><Icon name="check" />{limitLabel(k)}</li>)}
-        <li><Icon name="check" />Priority: {PRIORITIES[r.priorities]}</li>
-      </ul>
-    </section>
-  );
-  const Row = ({ tone, title, children }: { tone: Tone; title: string; children?: ReactNode }) => (
-    <li className={`tone-${tone}`}><Icon name={tone === 'ok' ? 'check' : 'alert'} /><div><strong>{title}</strong>{children && <span>{children}</span>}</div></li>
-  );
+// Step 2 of the path: what the agent understood, next to the person's own words, with a Fix next to every part
+// and one "this is what I meant" before approving. Anything not in their words is called out.
+function ReadRow({ tone, title, field, onFix, children }: { tone: Tone; title: string; field?: string; onFix?: (field: string) => void; children?: ReactNode }) {
   return (
-    <section className="panel understood">
-      <h2>What the agent understood</h2>
-      <blockquote>{rb.text}</blockquote>
-      <ul className="understood-list">
-        {r.items.map((it: any, i: number) => (
-          <Row key={i} tone={rb.items[i].quantity_in_text ? 'ok' : 'warn'} title={`${num(it.quantity)} ${unitLabel(it.unit)} ${it.need}`}>
-            {!rb.items[i].quantity_in_text ? 'This amount is not in your words. Check it before approving.'
-              : rb.items[i].words ? `You wrote “${rb.items[i].words}”; Finnish product names use “${it.need}”.` : 'As you wrote it.'}
-          </Row>
-        ))}
-        <Row tone={rb.deliver_by === 'text' ? 'ok' : 'info'} title={`Deliver by ${day(r.deliver_by)}`}>
-          {rb.deliver_by === 'assumed' ? 'You gave no date, so the next delivery day.' : rb.deliver_by === 'interpreted' ? 'Worked out from your wording.' : 'As you wrote it.'}
-        </Row>
-        {limits.map((k: string) => (
-          <Row key={k} tone={rb.added_limits.includes(k) ? 'warn' : 'ok'} title={limitLabel(k)}>{rb.added_limits.includes(k) ? 'Added, not in your words.' : 'From your words. Every product must meet it.'}</Row>
-        ))}
-        <Row tone={rb.priorities_default ? 'info' : 'ok'} title={`Priority: ${PRIORITIES[r.priorities]}`}>{rb.priorities_default ? 'You named no priority, so price and stock.' : 'From your words.'}</Row>
-      </ul>
+    <li className={`tone-${tone}`}>
+      <Icon name={tone === 'ok' ? 'check' : tone === 'info' ? 'info' : 'alert'} />
+      <div><strong>{title}</strong>{children && <span>{children}</span>}</div>
+      {field && onFix && <button className="btn sm quiet fix" onClick={() => onFix(field)}><Icon name="edit" size={13} />Fix</button>}
+    </li>
+  );
+}
+type Fixes = { confirm: () => void; correct: (fix: object) => Promise<boolean>; busy: boolean; open: boolean };
+function ReadBack({ p, fx }: { p: any; fx: Fixes }) {
+  const [editing, setEditing] = useState<string | null>(null);
+  const rb = p.read_back, r = p.request, rc = r.recipe, c = p.confirmation;
+  const limits = [...r.diets, ...r.exclude_allergens];
+  const fix = fx.open && !editing ? setEditing : undefined;
+  const heading = rc ? 'From the recipe' : rb ? 'What the agent understood' : 'What was asked';
+  return (
+    <section className={`panel understood ${c.required ? 'pending' : ''}`} id="understood" aria-labelledby="understood-h">
+      <div className="panel-head">
+        <h2 id="understood-h">{heading}</h2>
+        {rc && <a className="small" href={rc.url} target="_blank" rel="noreferrer">Original recipe<Icon name="external" size={12} /></a>}
+      </div>
+      {rc ? <p className="muted">{rc.name} serves {rc.yield}. Scaled to {num(rc.portions)} portions, every amount × {num(rc.portions / rc.yield)}, rounded up to 10 g.</p>
+        : rb ? <blockquote>{rb.text}</blockquote>
+        : <p className="muted">Entered as a form or by an agent, so there are no original words to compare with.</p>}
+
+      {editing ? <FixForm p={p} focus={editing} fx={fx} close={() => setEditing(null)} /> : (
+        <ul className="understood-list">
+          {rc ? <ReadRow onFix={fix} tone="ok" title={`${num(rc.portions)} portions`} field="portions">{p.items.length} ingredients to buy</ReadRow>
+            : r.items.map((it: any, i: number) => (
+              <ReadRow key={i} onFix={fix} tone={!rb || rb.items[i].quantity_in_text ? 'ok' : 'warn'} title={`${num(it.quantity)} ${unitLabel(it.unit)} ${it.need}`} field={`item-${i}`}>
+                {!rb ? undefined : !rb.items[i].quantity_in_text ? 'This amount is not in your words. Check it before approving.'
+                  : rb.items[i].words ? `You wrote “${rb.items[i].words}”; Finnish product names use “${it.need}”.` : 'As you wrote it.'}
+              </ReadRow>
+            ))}
+          <ReadRow onFix={fix} tone={!rb || rb.deliver_by === 'text' ? 'ok' : 'info'} title={`Deliver by ${day(r.deliver_by)}`} field="date">
+            {r.deliver_by_defaulted ? 'No date was given, so the next delivery day.' : rb?.deliver_by === 'interpreted' ? 'Worked out from your wording.' : rb ? 'As you wrote it.' : undefined}
+          </ReadRow>
+          {limits.map((k: string) => (
+            <ReadRow key={k} onFix={fix} tone={rb?.added_limits.includes(k) ? 'warn' : 'ok'} title={limitLabel(k)} field="limits">
+              {rb?.added_limits.includes(k) ? 'Added, not in your words.' : rb ? 'From your words. Every product must meet it.' : 'Every product must meet it.'}
+            </ReadRow>
+          ))}
+          {!limits.length && <ReadRow onFix={fix} tone="info" title="No diets or allergies" field="limits">Add one if any product must meet it.</ReadRow>}
+          {!rc && <ReadRow onFix={fix} tone={rb?.priorities_default ? 'info' : 'ok'} title={`Priority: ${PRIORITIES[r.priorities]}`} field="priority">
+            {rb?.priorities_default ? 'You named no priority, so price and stock.' : undefined}
+          </ReadRow>}
+          {rc?.skipped.map((x: any, i: number) => (
+            <ReadRow key={`s${i}`} tone="info" title={`Not bought: ${x.text}`}>{
+              x.reason === 'usually in stock' ? 'Kitchens usually have it.' : x.reason === 'to taste' ? 'To taste, the recipe gives no amount.' : 'Nothing to buy (water).'}</ReadRow>
+          ))}
+        </ul>
+      )}
+
+      {!editing && fx.open && (
+        <div className="confirm-bar">
+          {c.done ? <p className="confirmed"><Icon name="check" size={16} />You confirmed this is what you meant{c.done.at && `, ${ago(c.done.at)}`}.</p>
+            : c.skipped_by_trust ? <p className="confirmed"><Icon name="spark" size={16} />No need to confirm: you approved {c.threshold} orders in a row without fixes. Fix anything that is off.</p>
+            : c.required ? <>
+              <p><strong>Is this what you meant?</strong> Confirm it, or fix what is off. Approving stays locked until then.</p>
+              <button className="btn lime" disabled={fx.busy} onClick={fx.confirm}><Icon name="check" />Yes, this is what I meant</button>
+            </> : <p className="muted small">The agent finished this order within your policy. Fix anything that is off and it is planned again.</p>}
+        </div>
+      )}
     </section>
   );
 }
 
-// Read-back for a recipe order: every quantity traced to its recipe line, and what was left out and why.
-function RecipeReadBack({ p }: { p: any }) {
-  const rc = p.request.recipe;
+/** One small form for every Fix: opens on the part that was clicked, sends only what changed, plans the order again. */
+function FixForm({ p, focus, fx, close }: { p: any; focus: string; fx: Fixes; close: () => void }) {
+  const r = p.request, rc = r.recipe, rb = p.read_back;
+  const [items, setItems] = useState<any[]>(r.items.map((it: any) => ({ need: it.need, quantity: it.quantity, unit: it.unit, ...(it.product ? { product: it.product } : {}) })));
+  const [portions, setPortions] = useState<number>(rc?.portions ?? 0);
+  const [date, setDate] = useState<string>(r.deliver_by);
+  const [diets, setDiets] = useState<string[]>(r.diets);
+  const [allergens, setAllergens] = useState<string[]>(r.exclude_allergens);
+  const [prio, setPrio] = useState<string>(r.priorities);
+  // Limits found in the person's own words always apply (the gateway adds them back), so they are shown locked.
+  const fromWords = (k: string) => !!rb && !rb.added_limits.includes(k);
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const fix: Record<string, unknown> = {};
+    if (rc ? portions !== rc.portions : JSON.stringify(items) !== JSON.stringify(r.items.map((it: any) => ({ need: it.need, quantity: it.quantity, unit: it.unit, ...(it.product ? { product: it.product } : {}) })))) {
+      if (rc) fix.portions = portions; else fix.items = items;
+    }
+    if (date !== r.deliver_by) fix.deliver_by = date;
+    if (JSON.stringify(diets) !== JSON.stringify(r.diets)) fix.diets = diets;
+    if (JSON.stringify(allergens) !== JSON.stringify(r.exclude_allergens)) fix.exclude_allergens = allergens;
+    if (!rc && prio !== r.priorities) fix.priorities = prio;
+    if (!Object.keys(fix).length) return close();
+    if (await fx.correct(fix)) close();
+  };
+  const toggle = (xs: string[], x: string) => (xs.includes(x) ? xs.filter((y) => y !== x) : [...xs, x]);
   return (
-    <section className="panel understood">
-      <div className="panel-head">
-        <h2>From the recipe</h2>
-        <a className="small" href={rc.url} target="_blank" rel="noreferrer">Original recipe<Icon name="external" size={12} /></a>
-      </div>
-      <p className="muted">{rc.name} serves {rc.yield}. Scaled to {num(rc.portions)} portions, every amount × {num(rc.portions / rc.yield)}, rounded up to 10 g.</p>
-      {!!rc.skipped.length && (
-        <ul className="understood-list">{rc.skipped.map((x: any, i: number) => (
-          <li key={i} className="tone-info"><Icon name="info" /><div><strong>Not bought: {x.text}</strong><span>{
-            x.reason === 'usually in stock' ? 'Kitchens usually have it. Tick it on the recipe page to buy it too.' : x.reason === 'to taste' ? 'To taste, the recipe gives no amount.' : 'Nothing to buy (water).'}</span></div></li>
-        ))}</ul>
+    <form className="fix-form" onSubmit={save}>
+      {rc ? (
+        <div className="field"><label htmlFor="fix-portions">Portions</label>
+          <input id="fix-portions" type="number" min={1} max={5000} step={1} autoFocus={focus === 'portions'} value={portions} onChange={(e) => setPortions(Math.max(1, Math.round(+e.target.value)))} />
+          <span className="hint">{num(portions / rc.yield)} × the recipe</span></div>
+      ) : (
+        <fieldset>
+          <legend>Products</legend>
+          {items.map((it, i) => (
+            <div key={i} className="item-row">
+              <div className="field grow"><label htmlFor={`fix-need-${i}`}>Product</label>
+                <input id={`fix-need-${i}`} required value={it.need} autoFocus={focus === `item-${i}`} onChange={(e) => setItems(items.map((x, j) => (j === i ? { ...x, need: e.target.value } : x)))} /></div>
+              <div className="field"><label htmlFor={`fix-q-${i}`}>Amount</label>
+                <input id={`fix-q-${i}`} type="number" min={0.001} step="any" required value={it.quantity} onChange={(e) => setItems(items.map((x, j) => (j === i ? { ...x, quantity: +e.target.value } : x)))} /></div>
+              <div className="field"><label htmlFor={`fix-u-${i}`}>Unit</label>
+                <select id={`fix-u-${i}`} value={it.unit} onChange={(e) => setItems(items.map((x, j) => (j === i ? { ...x, unit: e.target.value } : x)))}>
+                  <option value="l">litres</option><option value="kg">kg</option><option value="pcs">pieces</option></select></div>
+              {items.length > 1 && <button type="button" className="btn quiet icon" aria-label={`Remove ${it.need}`} onClick={() => setItems(items.filter((_, j) => j !== i))}><Icon name="x" /></button>}
+            </div>
+          ))}
+          <button type="button" className="btn sm" onClick={() => setItems([...items, { need: '', quantity: 1, unit: 'kg' }])}><Icon name="plus" size={14} />Add a product</button>
+          <p className="hint">Finnish product names match best (maito, kauraleipä).</p>
+        </fieldset>
       )}
-    </section>
+      <div className="two-col">
+        <div className="field"><label htmlFor="fix-date">Deliver by</label>
+          <input id="fix-date" type="date" required autoFocus={focus === 'date'} value={date} onChange={(e) => setDate(e.target.value)} /></div>
+        {!rc && <div className="field"><label htmlFor="fix-prio">What matters most</label>
+          <select id="fix-prio" autoFocus={focus === 'priority'} value={prio} onChange={(e) => setPrio(e.target.value)}>
+            {Object.entries(PRIORITIES).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+          </select></div>}
+      </div>
+      <fieldset>
+        <legend>Diets and allergies</legend>
+        <div className="checks-row">
+          {DIETS.map(([d, l], i) => (
+            <label key={d} className="check-pill">
+              <input type="checkbox" autoFocus={focus === 'limits' && i === 0} checked={diets.includes(d)} disabled={diets.includes(d) && fromWords(d)} onChange={() => setDiets(toggle(diets, d))} />{l}
+              {diets.includes(d) && fromWords(d) && <Icon name="lock" size={12} />}
+            </label>
+          ))}
+          {Object.entries(GS1).filter(([k]) => ['AM', 'AW', 'AE', 'AN', 'AP', 'AF', 'AY', 'AS'].includes(k)).map(([k, l]) => (
+            <label key={k} className="check-pill">
+              <input type="checkbox" checked={allergens.includes(k)} disabled={allergens.includes(k) && fromWords(k)} onChange={() => setAllergens(toggle(allergens, k))} />No {l}
+              {allergens.includes(k) && fromWords(k) && <Icon name="lock" size={12} />}
+            </label>
+          ))}
+        </div>
+        {!!rb && <p className="hint"><Icon name="lock" size={12} /> Found in your words, so always applied.</p>}
+      </fieldset>
+      <div className="form-foot">
+        <button type="button" className="btn quiet" onClick={close}>Cancel</button>
+        <button className="btn" disabled={fx.busy} aria-busy={fx.busy}>{fx.busy ? <><Icon name="loader" className="spin" />Planning again…</> : 'Save and plan again'}</button>
+      </div>
+      <p className="act-note">The agent plans the order again with your correction and every check runs again. A fix counts as a change for the trust count.</p>
+    </form>
   );
 }
 
@@ -629,13 +831,13 @@ function fact(f: string) {
     const sure = m[3] ? ' with confirmed stock' : '';
     return m[1] === m[4] ? `${m[1]} per ${m[2]}, the cheapest${sure}` : `${m[1]} per ${m[2]} (cheapest${sure}: ${m[4]})`;
   }
-  if (f === 'amount not confirmed') return 'Stock not confirmed: a person must accept it';
+  if (f === 'amount not confirmed') return 'Delivery not confirmed by Valio';
   if ((m = f.match(/^([\d.]+) (\w+) available$/))) return `${num(+m[1])} ${m[2]} in stock, confirmed by Valio`;
   if ((m = f.match(/^delivers (\d{4}-\d{2}-\d{2})$/))) return `Delivered ${day(m[1])}`;
   if ((m = f.match(/^part (\d+) of (\d+), covers ([\d.]+) of ([\d.]+) (\w+)$/))) return `Part ${m[1]} of ${m[2]}: ${num(+m[3])} of ${num(+m[4])} ${m[5]}`;
   if (f === 'named in the request') return 'The product the recipe names';
   if (f === 'chosen by user') return 'Chosen by a person';
-  if (f === 'confirmed amounts only') return 'Only confirmed stock used';
+  if (f === 'confirmed amounts only') return 'Sure-delivery option';
   return f;
 }
 
@@ -674,7 +876,7 @@ function Item({ it, from, open, busy, revise }: { it: any; from?: string; open: 
         const why = it.dropped.reduce((m: Record<string, number>, d: any) => { for (const r of d.reasons) m[r] = (m[r] ?? 0) + 1; return m; }, {});
         return (
           <Callout tone="warn" title={`${num(it.shortfall)} of ${num(it.item.quantity)} ${unit} not covered`}>
-            {it.options.some((o: any) => o.available === null) && <p>Products whose stock Valio does not confirm are not used on their own. You can choose one in the comparison below and accept the risk.</p>}
+            {mode === 'confirmed' && it.options.some((o: any) => o.available === null) && <p>Only stock Valio confirms is used. Go back to the best option to include products whose stock is not confirmed.</p>}
             {!it.options.length && !!it.dropped.length && <p>Nothing matching “{it.item.need}” can be delivered by this date ({Object.entries(why).map(([r, n]) => `${n} × ${plain(r)}`).join(', ')}). A later delivery date may help.</p>}
             {!it.options.length && !it.dropped.length && <p>No product matched “{it.item.need}” within your limits. Try another word; Finnish product names match best.</p>}
           </Callout>
@@ -704,6 +906,25 @@ function Item({ it, from, open, busy, revise }: { it: any; from?: string; open: 
       )}
       {!!lineFlags.length && <FlagList codes={lineFlags} />}
 
+      {it.sure_option && (
+        <div className="sure">
+          <div className="sure-head">
+            <Icon name="truck" size={18} />
+            <div>
+              <strong>Sure-delivery option</strong>
+              <span>Same need from stock Valio confirms: {it.sure_option.lines.map((l: any) => `${num(l.units)} × ${l.name}`).join(' + ')}.
+                {it.sure_option.shortfall > 0 && ` Covers all but ${num(it.sure_option.shortfall)} ${unit}.`}</span>
+            </div>
+            <span className="sure-cost num">{eur(it.sure_option.cost_cents)}<small>{it.sure_option.extra_cents >= 0 ? '+' : '−'}{eur(Math.abs(it.sure_option.extra_cents))}</small></span>
+          </div>
+          {open && <button className="btn" disabled={busy} onClick={() => revise({ confirmed_only: true })}><Icon name="check" />Use the sure-delivery option</button>}
+        </div>
+      )}
+      {mode === 'confirmed' && (
+        <p className="note-line tone-ok"><Icon name="truck" size={15} /><span>Using the sure-delivery option: every line has stock confirmed by Valio.
+          {open && <> <button className="linklike" disabled={busy} onClick={() => revise({})}>Back to the best option</button></>}</span></p>
+      )}
+
       {open && (
         <details className="change">
           <summary><Icon name="edit" size={15} />Change this item</summary>
@@ -715,8 +936,8 @@ function Item({ it, from, open, busy, revise }: { it: any; from?: string; open: 
             </form>
             {mode !== 'best' && (
               <div className="choice">
-                <span>{mode === 'choose' ? 'You picked the product for this item.' : 'Only confirmed stock is used.'}</span>
-                <button className="btn" disabled={busy} onClick={() => revise({})}>Back to the agent’s pick</button>
+                <span>{mode === 'choose' ? 'You picked the product for this item.' : 'Using the sure-delivery option.'}</span>
+                <button className="btn" disabled={busy} onClick={() => revise({})}>Back to the best option</button>
               </div>
             )}
             <p className="muted small">To use another product, choose it in the comparison below. Every change runs all checks again.</p>
@@ -793,6 +1014,9 @@ function summarize(e: any): { title: string; text?: string; tone: Tone } {
       text: d.diffs.map((x: any) => `${x.id} ${x.what.replace(/_/g, ' ')}: ${x.before} → ${x.after}`).join('; ') };
     case 'approved': return { title: 'Approved', tone: 'ok', text: `Prices and stock re-checked with Valio${d.note ? `. Note: “${d.note}”` : ''}` };
     case 'rejected': return { title: 'Rejected', tone: 'bad', text: d.note };
+    case 'request_confirmed': return { title: 'Request confirmed', tone: 'ok', text: 'A person confirmed this is what they meant.' };
+    case 'request_corrected': return { title: 'Request corrected', tone: 'info',
+      text: Object.entries(d.correction).map(([k, v]) => k === 'items' ? (v as any[]).map((it) => `${num(it.quantity)} ${unitLabel(it.unit)} ${it.need}`).join(', ') : k === 'deliver_by' ? `delivery ${day(v as string)}` : k === 'portions' ? `${v} portions` : `${k.replace(/_/g, ' ')}: ${(v as string[] | string).toString() || 'none'}`).join('; ') + '. Planned again.' };
     case 'autonomy_revoked': return { title: 'Agent autonomy switched off', tone: 'bad', text: 'A person rejected an order the agent finished on its own. From now on you sign off every order again.' };
     case 'exported': return { title: 'Webshop file downloaded', tone: 'neutral', text: `${d.lines} line(s), fingerprint ${d.sha256.slice(0, 12)}…` };
     default: return { title: e.event, tone: 'neutral' };
@@ -819,120 +1043,121 @@ function Timeline({ events }: { events: any[] }) {
   );
 }
 
-// ---------- New order: ask → confirm what was understood → plan ----------
-type Draft = { items: { need: string; quantity: number; unit: string }[]; deliver_by?: string; diets: string[]; exclude_allergens: string[]; priorities: string; source_text?: string };
+// Voice input: the browser's own speech recognition (Chrome, Edge, Safari). No library, no key; Chrome sends the audio
+// to Google to transcribe (context.md §15.4). Firefox has none: the button is not shown. Needs localhost or HTTPS.
+const SPEECH_LANGS = [['en-GB', 'EN'], ['fi-FI', 'FI'], ['sv-SE', 'SV']] as const;
+const SPEECH_ERRORS: Record<string, string> = {
+  'not-allowed': 'Microphone access is blocked. Allow it in the address bar, then try again.',
+  'service-not-allowed': 'Microphone access is blocked. Allow it in the address bar, then try again.',
+  'no-speech': 'Nothing was heard. Press Speak and try again.',
+  'audio-capture': 'No microphone was found.',
+  network: 'The browser could not reach its speech service. Check the connection, or use Chrome, Edge or Safari.',
+  'language-not-supported': 'This language is not supported by the browser. Try EN.',
+};
+function VoiceInput({ onText, disabled }: { onText: (text: string) => void; disabled: boolean }) {
+  const SR = (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition;
+  // Brave exposes the API but has no speech service behind it: every start fails at once with a network error.
+  const brave = !!(navigator as any).brave;
+  const rec = useRef<any>(null);
+  const [listening, setListening] = useState(false);
+  const [err, setErr] = useState('');
+  const [lang, setLang] = useState(() => { try { return localStorage.getItem('speech-lang') ?? 'en-GB'; } catch { return 'en-GB'; } });
+  useEffect(() => () => rec.current?.abort(), []);
+  if (!SR || brave) return (
+    <p className="muted small voice-none"><Icon name="mic" size={14} />Voice input works in Chrome, Edge and Safari{brave ? '; Brave blocks the speech service it needs' : ''}. Type instead, or open this page there.</p>
+  );
+  const pick = (l: string) => { setLang(l); try { localStorage.setItem('speech-lang', l); } catch { /* private mode */ } };
+  const toggle = () => {
+    if (listening) { rec.current?.stop(); return; }
+    const r = new SR();
+    // continuous: keeps listening through short pauses ("1000 litres … of lactose-free milk"); Stop ends it.
+    r.lang = lang; r.interimResults = true; r.continuous = true;
+    r.onresult = (e: any) => onText(Array.from(e.results as ArrayLike<any>).map((x) => x[0].transcript).join(' ').trim());
+    r.onerror = (e: any) => {
+      console.warn('speech recognition error:', e.error, e.message);
+      if (e.error !== 'aborted') setErr(`${SPEECH_ERRORS[e.error] ?? 'Speech recognition stopped. Try again, or type instead.'} (${e.error})`);
+    };
+    r.onend = () => setListening(false);
+    rec.current = r;
+    setErr(''); onText(''); setListening(true);
+    try { r.start(); } catch { setListening(false); }
+  };
+  return (
+    <div className="voice">
+      <button type="button" className={`btn mic ${listening ? 'on' : ''}`} aria-pressed={listening} disabled={disabled} onClick={toggle}>
+        <Icon name={listening ? 'stop' : 'mic'} />{listening ? 'Stop' : 'Speak'}
+      </button>
+      <div className="segmented sm" role="group" aria-label="Language you speak">
+        {SPEECH_LANGS.map(([l, label]) => <button type="button" key={l} aria-pressed={lang === l} disabled={listening} onClick={() => pick(l)}>{label}</button>)}
+      </div>
+      <span className={`voice-status ${err && !listening ? 'err' : ''}`} aria-live="polite">{listening ? 'Listening… say the product, the amount and the date.' : err}</span>
+    </div>
+  );
+}
+
+// ---------- New order: ask → the agent plans → confirm on the proposal (step 2 sits next to the plan) ----------
 function NewOrder({ token }: { token: string }) {
-  const [text, setText] = useState(EXAMPLES[0]);
-  const [draft, setDraft] = useState<Draft | null>(null);
-  const [locked, setLocked] = useState<string[]>([]);
+  const [text, setText] = useState('');
   const [question, setQuestion] = useState('');
   const [err, setErr] = useState('');
-  const [busy, setBusy] = useState<'read' | 'plan' | null>(null);
-  const fail = (e: unknown) => { const q = (e as ApiError).body?.question; if (q) setQuestion(q); else setErr((e as Error).message); };
-
-  const read = async (e: FormEvent) => {
-    e.preventDefault(); setBusy('read'); setErr(''); setQuestion('');
+  const [busy, setBusy] = useState(false);
+  const plan = async (e: FormEvent) => {
+    e.preventDefault(); setBusy(true); setErr(''); setQuestion('');
     try {
       const { request, clarification } = await api(token, 'POST', '/parse', { text });
-      if (clarification) setQuestion(clarification);
-      else { setDraft({ ...request, items: request.items.map((i: any) => ({ ...i })) }); setLocked([...request.diets, ...request.exclude_allergens]); }
-    } catch (e) { fail(e); }
-    setBusy(null);
-  };
-  const plan = async () => {
-    if (!draft) return;
-    setBusy('plan'); setErr(''); setQuestion('');
-    try {
-      const p = await api(token, 'POST', '/proposals', { site: 'Hotel Kaisla Helsinki', ...draft, deliver_by: draft.deliver_by || undefined });
-      toast('Proposal ready. Check it and decide.');
+      if (clarification) { setQuestion(clarification); setBusy(false); return; }
+      const p = await api(token, 'POST', '/proposals', { site: 'Hotel Kaisla Helsinki', ...request });
+      toast('Proposal ready. Check that the agent understood you.');
       location.hash = `#/p/${p.id}`;
-    } catch (e) { fail(e); setBusy(null); }
+    } catch (e) {
+      const q = (e as ApiError).body?.question;
+      if (q) setQuestion(q); else setErr((e as Error).message);
+      setBusy(false);
+    }
   };
-  const setItem = (i: number, k: string, v: unknown) => setDraft({ ...draft!, items: draft!.items.map((it, j) => (j === i ? { ...it, [k]: v } : it)) });
-  const toggleDiet = (d: string) => setDraft({ ...draft!, diets: draft!.diets.includes(d) ? draft!.diets.filter((x) => x !== d) : [...draft!.diets, d] });
-  const stage = draft ? 2 : 1;
-
   return (
+    <>
+    <Band back={['#', 'All orders']} title="New order"
+      steps={earlySteps(busy ? 1 : 0, busy ? { 1: 'checking prices with Valio…' } : {})}
+      meta={<span><Icon name="shield" size={15} />Say it in your own words. You check what the agent understood before anything is approved.</span>} />
     <div className="wrap page narrow">
-      <a href="#" className="back dark"><Icon name="back" />All orders</a>
-      <h1>New order</h1>
-      <ol className="mini-steps" aria-label="Steps">
-        <li className={stage === 1 ? 'now' : 'done'} aria-current={stage === 1 ? 'step' : undefined}><span>1</span>Say what you need</li>
-        <li className={stage === 2 ? 'now' : ''} aria-current={stage === 2 ? 'step' : undefined}><span>2</span>Check what the agent understood</li>
-        <li><span>3</span>The agent plans the order</li>
-      </ol>
-
-      {!draft ? (
-        <form className="panel composer" onSubmit={read}>
-          <label htmlFor="text"><strong>What do you need, how much, and by when?</strong></label>
-          <textarea id="text" rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder="e.g. 1,000 litres of lactose-free milk by Monday" required />
-          <div className="examples"><span>Examples:</span>{EXAMPLES.map((x) => <button type="button" key={x} className="chip-btn" onClick={() => setText(x)}>{x}</button>)}</div>
-          <p className="muted small">English, Finnish or Swedish. Diets and allergies you mention (“lactose-free”, “no nuts”) are always applied.</p>
-          {question && <Callout tone="info" icon="info" title="One question first">{question}</Callout>}
-          {err && <Callout tone="bad" title="The request could not be read">{err}</Callout>}
-          <div className="form-foot">
-            <a href="#/recipes" className="muted">Ordering for a recipe? Pick it here.</a>
-            <button className="btn lime" disabled={!!busy || !text.trim()} aria-busy={busy === 'read'}>
-              {busy === 'read' ? <><Icon name="loader" className="spin" />Reading…</> : 'Continue'}
+      <form className="ask" onSubmit={plan}>
+        <label htmlFor="text" className="ask-label">What do you need, how much, and by when?</label>
+        <div className="ask-box">
+          <textarea id="text" rows={3} value={text} onChange={(e) => setText(e.target.value)} required
+            placeholder="e.g. 1,000 litres of lactose-free milk by Monday"
+            onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) e.currentTarget.form?.requestSubmit(); }} />
+          <div className="ask-bar">
+            <VoiceInput onText={setText} disabled={busy} />
+            <button className="btn lime" disabled={busy || !text.trim()} aria-busy={busy}>
+              {busy ? <><Icon name="loader" className="spin" />Checking prices with Valio…</> : 'Plan the order'}
             </button>
           </div>
-        </form>
-      ) : (
-        <section className="panel confirm" aria-labelledby="confirm-h">
-          <h2 id="confirm-h">Is this right?</h2>
-          <blockquote>{draft.source_text}</blockquote>
-          <p className="muted small">Correct anything that is off. Changing an amount away from your words means you confirm it once more before approving.</p>
+        </div>
+        {question && <Callout tone="info" icon="info" title="One question first">{question}</Callout>}
+        {err && <Callout tone="bad" title="The order could not be planned">{err}</Callout>}
 
-          <fieldset>
-            <legend>Products</legend>
-            {draft.items.map((it, i) => (
-              <div key={i} className="item-row">
-                <div className="field grow"><label htmlFor={`need-${i}`}>Product</label><input id={`need-${i}`} value={it.need} onChange={(e) => setItem(i, 'need', e.target.value)} required /></div>
-                <div className="field"><label htmlFor={`q-${i}`}>Amount</label><input id={`q-${i}`} type="number" min={0.001} step="any" value={it.quantity} onChange={(e) => setItem(i, 'quantity', +e.target.value)} /></div>
-                <div className="field"><label htmlFor={`u-${i}`}>Unit</label>
-                  <select id={`u-${i}`} value={it.unit} onChange={(e) => setItem(i, 'unit', e.target.value)}><option value="l">litres</option><option value="kg">kg</option><option value="pcs">pieces</option></select></div>
-                {draft.items.length > 1 && <button type="button" className="btn quiet icon" aria-label={`Remove ${it.need}`} onClick={() => setDraft({ ...draft, items: draft.items.filter((_, j) => j !== i) })}><Icon name="x" /></button>}
-              </div>
+        <div className="try">
+          <span className="try-label">Or start from an example</span>
+          <div className="try-cards">
+            {EXAMPLES.map((x) => (
+              <button type="button" key={x.title} className="try-card" aria-pressed={text === x.text} onClick={() => setText(x.text)}>
+                <span className="try-icon"><Icon name={x.icon} size={22} /></span>
+                <span><strong>{x.title}</strong><span>“{x.text}”</span></span>
+              </button>
             ))}
-            <p className="hint">Product names work best in Finnish (maito, kauraleipä): that is how Valio names them.</p>
-          </fieldset>
-
-          <div className="two-col">
-            <div className="field"><label htmlFor="date">Deliver by</label>
-              <input id="date" type="date" value={draft.deliver_by ?? ''} onChange={(e) => setDraft({ ...draft, deliver_by: e.target.value || undefined })} />
-              <span className="hint">{draft.deliver_by ? day(draft.deliver_by) : 'Empty: the next delivery day.'}</span></div>
-            <div className="field"><label htmlFor="prio">What matters most</label>
-              <select id="prio" value={draft.priorities} onChange={(e) => setDraft({ ...draft, priorities: e.target.value })}>
-                {Object.entries(PRIORITIES).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
-              </select></div>
           </div>
+        </div>
 
-          <fieldset>
-            <legend>Diets and allergies</legend>
-            <div className="checks-row">
-              {DIETS.map(([d, l]) => (
-                <label key={d} className="check-pill">
-                  <input type="checkbox" checked={draft.diets.includes(d)} disabled={locked.includes(d)} onChange={() => toggleDiet(d)} />{l}
-                  {locked.includes(d) && <Icon name="lock" size={12} />}
-                </label>
-              ))}
-              {draft.exclude_allergens.map((a) => <span key={a} className="check-pill on"><Icon name="lock" size={12} />No {GS1[a] ?? a}</span>)}
-            </div>
-            {!!locked.length && <p className="hint"><Icon name="lock" size={12} /> Found in your words, so always applied. To remove one, change the text.</p>}
-          </fieldset>
-
-          {question && <Callout tone="info" icon="info" title="One question first">{question}</Callout>}
-          {err && <Callout tone="bad" title="The order could not be planned">{err}</Callout>}
-          <div className="form-foot">
-            <button type="button" className="btn quiet" onClick={() => setDraft(null)}><Icon name="back" />Change the text</button>
-            <button type="button" className="btn lime" disabled={!!busy || !draft.items.length || draft.items.some((i) => !i.need.trim() || !(i.quantity > 0))} aria-busy={busy === 'plan'} onClick={plan}>
-              {busy === 'plan' ? <><Icon name="loader" className="spin" />Checking prices with Valio…</> : 'Plan the order'}
-            </button>
-          </div>
-          <p className="act-note">The agent searches Valio Aimo’s products, checks live prices and stock, and prepares a proposal. Nothing is ordered.</p>
-        </section>
-      )}
+        <ul className="ask-notes">
+          <li><Icon name="globe" size={16} />English, Finnish or Swedish, typed or spoken.</li>
+          <li><Icon name="shield" size={16} />Diets and allergies you mention (“lactose-free”, “no nuts”) are always applied.</li>
+          <li><Icon name="check" size={16} />You see what the agent understood and can fix it before anything is approved.</li>
+          <li><Icon name="book" size={16} />Cooking a dish? <a href="#/recipes">Order for a recipe</a> instead.</li>
+        </ul>
+      </form>
     </div>
+    </>
   );
 }
 
@@ -991,19 +1216,18 @@ function RecipePage({ id, token }: { id: string; token: string }) {
   };
   const toggle = (xs: string[], x: string) => (xs.includes(x) ? xs.filter((y) => y !== x) : [...xs, x]);
   return (
+    <>
+    <Band back={['#/recipes', 'All recipes']} title={r.name}
+      steps={earlySteps(busy ? 1 : 0, busy ? { 0: `a recipe, ${num(portions)} portions`, 1: 'checking prices with Valio…' } : { 0: `a recipe, ${num(portions)} portions` })}
+      meta={<>
+        <span><Icon name="book" size={15} />{r.course}, serves {r.yield} in the original</span>
+        <a href={r.url} target="_blank" rel="noreferrer">See the recipe on valioaimo.fi<Icon name="external" size={13} /></a>
+      </>} />
     <div className="wrap page">
-      <a href="#/recipes" className="back dark"><Icon name="back" />All recipes</a>
       <div className="recipe-layout">
         <div>
-          <div className="recipe-head">
-            {r.image && <img src={r.image} alt="" />}
-            <div>
-              <span className="course">{r.course}</span>
-              <h1>{r.name}</h1>
-              <p className="muted">Serves {r.yield} in the original. <a href={r.url} target="_blank" rel="noreferrer">See the recipe on valioaimo.fi<Icon name="external" size={12} /></a></p>
-            </div>
-          </div>
           <section className="panel">
+            {r.image && <img className="recipe-hero" src={r.image} alt="" />}
             <h2>Ingredients for {num(portions)} portions</h2>
             <p className="muted small">Amounts are scaled from the recipe and rounded up to 10 g. The agent then finds a product for each and rounds up to whole packs.</p>
             <div className="scroll"><table className="data">
@@ -1053,6 +1277,7 @@ function RecipePage({ id, token }: { id: string; token: string }) {
         </aside>
       </div>
     </div>
+    </>
   );
 }
 
@@ -1063,6 +1288,12 @@ function Policy({ token, suggest }: { token: string; suggest: boolean }) {
   const [trust, setTrust] = useState<any>(null);
   const [err, setErr] = useState('');
   const [fromTrust, setFromTrust] = useState(false);
+  const [agentsOn, setAgentsOn] = useState(true);
+  useEffect(() => { api(token, 'GET', '/agents').then((a) => setAgentsOn(a.enabled), () => {}); }, [token]);
+  // Kill switch: not part of the policy draft, it takes effect at once.
+  const switchAgents = (enabled: boolean) => api(token, 'PUT', '/agents', { enabled }).then((a) => {
+    setAgentsOn(a.enabled); toast(a.enabled ? 'Agents are switched on again.' : 'All agents are switched off. They cannot search, plan or export.');
+  }, (e) => setErr(e.message));
   useEffect(() => {
     Promise.all([api(token, 'GET', '/policy'), api(token, 'GET', '/trust').catch(() => null)]).then(([p, t]) => {
       setSaved(p); setTrust(t); setPol(suggest && t?.suggestion ? t.suggestion.policy : p); setFromTrust(suggest && !!t?.suggestion);
@@ -1098,6 +1329,12 @@ function Policy({ token, suggest }: { token: string; suggest: boolean }) {
         {toggle('agent_may_finalise', 'The agent may finish orders on its own',
           'Now: when every check below passes, the agent may send the order to the webshop without you.',
           'Now: you sign off every order, whatever it costs. This is the safe start.')}
+        <label className="setting">
+          <div><strong>Agents may work for you</strong><p>{agentsOn
+            ? 'Now: AI agents can search, plan and propose orders. Switch off to stop every agent at once.'
+            : 'Now: every agent is switched off. Nothing reaches the gateway until you switch them on again.'}</p></div>
+          <input type="checkbox" role="switch" className="switch" checked={agentsOn} onChange={(e) => switchAgents(e.target.checked)} aria-label="Agents may work for you" />
+        </label>
       </section>
       <section className="panel">
         <h2>Money</h2>
@@ -1107,7 +1344,9 @@ function Policy({ token, suggest }: { token: string; suggest: boolean }) {
       </section>
       <section className="panel">
         <h2>Stock</h2>
-        <p className="setting-note"><Icon name="lock" size={14} />Orders use only stock Valio confirms, so they are sure to be delivered. This is fixed.</p>
+        {toggle('allow_unconfirmed_stock', 'Accept products without a confirmed stock amount',
+          'Now: when Valio reports no amount for a product (it can still be ordered), the agent may use it, also when it finishes an order on its own.',
+          'Now: a line without a confirmed amount waits for you, with a sure-delivery option next to it. Finishing alone, the agent takes the sure option.')}
         {toggle('allow_split', 'Allow splitting an item',
           'Now: when one product is short, the agent may split the item across up to three products.',
           'Now: a split item waits for you.')}
@@ -1116,7 +1355,7 @@ function Policy({ token, suggest }: { token: string; suggest: boolean }) {
         <h2><Icon name="lock" />Always checked by a person</h2>
         <p className="muted">Fixed rules. No setting, and no agent, can turn them off.</p>
         <ul className="hard">
-          {['confirmed_stock', 'allergen_and_diet_limits', 'alcohol_needs_human', 'need_covered', 'on_time', 'live_prices', 'matches_request_text', 'usual_quantity', 'request_budget'].map((k) => (
+          {['allergen_and_diet_limits', 'alcohol_needs_human', 'need_covered', 'on_time', 'live_prices', 'matches_request_text', 'usual_quantity', 'request_budget'].map((k) => (
             <li key={k}><strong>{RULES[k].label}</strong><span>{RULES[k].why}</span></li>
           ))}
         </ul>

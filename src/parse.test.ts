@@ -57,3 +57,23 @@ test('read-back: quantities are checked against the text, assumptions are named'
   assert.deepEqual(rb.added_limits, ['AM']);
   assert.equal(readBack({ items: [], deliver_by: '', diets: [], exclude_allergens: [], priorities: 'sustainability' }), null);
 });
+
+test('spoken numbers: number words count like digits (en, fi, sv)', async () => {
+  const { numbersToDigits, quantityInText } = await import('./parse.ts');
+  const cases: [string, string][] = [
+    ['a thousand litres of milk', '1000 litres of milk'],
+    ['two hundred and fifty kilos', '250 kilos'],
+    ['one thousand five hundred litres', '1500 litres'],
+    ['twenty-five kg flour, nine pcs', '25 kg flour, 9 pcs'],
+    ['tuhat litraa maitoa', '1000 litraa maitoa'],
+    ['kaksisataaviisikymmentä litraa', '250 litraa'],
+    ['yksitoista kiloa ja kaksikymmentäkaksi litraa', '11 kiloa ja 22 litraa'],
+    ['tvåhundra liter mjölk', '200 liter mjölk'],
+    ['often enough, satama', 'often enough, satama'], // words that only start like numbers stay
+  ];
+  for (const [said, digits] of cases) assert.equal(numbersToDigits(said), digits, said);
+  const r = parseRequest('I need a thousand litres of lactose-free milk by Monday');
+  assert.deepEqual(r.request.items, [{ need: 'milk', quantity: 1000, unit: 'l' }]);
+  assert.equal(r.request.source_text, 'I need a thousand litres of lactose-free milk by Monday'); // the person's words are kept
+  assert.ok(quantityInText('kaksisataa litraa maitoa', 200));
+});

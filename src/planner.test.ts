@@ -37,14 +37,17 @@ test('golden: 1,000 l lactose-free milk on cached offers', async () => {
 
   assert.equal(r.category, '10400');
   assert.ok(!r.dropped.some((d) => d.reasons.some((x) => x.includes('E9'))), 'cache not recorded: run the planner online once');
-  for (const e of ['E2', 'E6']) assert.ok(r.exceptions.includes(e), e);
+  for (const e of ['E2', 'E5', 'E6']) assert.ok(r.exceptions.includes(e), e);
   assert.deepEqual(r.options.slice(0, 3).map((o) => o.id), ['464306', '464401', '464237']);
   for (const o of r.options) assert.deepEqual(ineligibility(o.product, limits), []);
 
-  // The top-ranked Eila (464306) has no confirmed stock: the order uses only stock Valio confirms, split three ways.
-  assert.deepEqual(r.allocation.map((a) => [a.id, a.sales_units, a.flags]), [['469363', 384, ['E4']], ['462775', 51, ['E4']], ['463380', 565, ['E4']]]);
-  assert.equal(r.allocation.reduce((s, a) => s + a.cost_cents, 0), 258064);
-  assert.match(r.allocation[0].reason, /best confirmed €2\.48\/l/);
+  // Best option: the top-ranked Eila, stock not confirmed (E5). The sure-delivery option uses confirmed stock only.
+  assert.deepEqual(r.allocation.map((a) => [a.id, a.sales_units, a.cost_cents, a.flags]), [['464306', 1000, 101000, ['E5']]]);
+  assert.deepEqual(r.sure_option?.lines.map((l) => [l.id, l.units]), [['469363', 384], ['462775', 51], ['463380', 565]]);
+  assert.equal(r.sure_option?.cost_cents, 258064);
+  const sure = await planItem(db, { need: 'maito', quantity: 1000, unit: 'l' }, limits, '2026-11-16', 'price_and_availability', { confirmed_only: true });
+  assert.deepEqual(sure.allocation.map((a) => a.id), ['469363', '462775', '463380']);
+  assert.match(sure.allocation[0].reason, /rank 1 of \d+ with confirmed stock/);
 
   const e2 = r.dropped.find((d) => d.id === '464440')!;
   assert.ok(e2.reasons[0].includes('E2'));
@@ -70,7 +73,7 @@ test('AI product check can only narrow: removals are listed, invented ids are ig
     assert.ok(r.ai_check?.answered);
     assert.ok(!r.options.some((o) => o.id === '464401') && !r.options.some((o) => o.id === '999999'));
     assert.deepEqual(r.excluded.find((e) => e.id === '464401')?.reasons, ['not maito (AI product check)']);
-    assert.equal(r.allocation[0].id, '469363');
+    assert.equal(r.allocation[0].id, '464306');
   } finally {
     f.mock.restore();
     delete process.env.GEMINI_API_KEY;

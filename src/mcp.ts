@@ -51,14 +51,15 @@ server.registerTool('get_product', {
 
 server.registerTool('check_offers', {
   description: 'Live price and availability from Valio for up to 50 product ids on a delivery date (YYYY-MM-DD). '
-    + 'Query only a shortlist. Exception codes: E2 not deliverable, E3 late, E5 stock not confirmed (a person must accept it), E6 cut-off passed, E7 no price, E9 API trouble.',
+    + 'Query only a shortlist. Exception codes: E2 not deliverable, E3 late, E5 no stock amount reported (the customer policy decides whether a person must accept it), E6 cut-off passed, E7 no price, E9 API trouble.',
   inputSchema: { ids: z.array(z.string()).min(1).max(50), date: z.string() },
   annotations: { readOnlyHint: true, openWorldHint: true },
 }, (a) => gateway('POST', '/offers', a));
 
 server.registerTool('create_proposal', {
   description: 'Turn a purchase request into an order proposal: matched products, frozen prices, quantities in sales units, '
-    + 'a reason per line and a policy verdict. ' + AFTER,
+    + 'a reason per line and a policy verdict. Always pass the person\'s own words as `source_text`: quantities are checked '
+    + 'against it, and without it the proposal always waits for a person. ' + AFTER,
   inputSchema: PurchaseRequest,
 }, (a) => gateway('POST', '/proposals', a));
 

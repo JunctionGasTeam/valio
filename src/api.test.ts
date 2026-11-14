@@ -29,7 +29,9 @@ mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
   const ep = url.endsWith('/price') ? 'price' : 'availability';
   return Response.json({
     products: products.map((id: string) => {
-      const r = JSON.parse(snap.get(`${ep}|${id}|${requestedDate}`) ?? (ep === 'price'
+      // Asked for Sunday 15 Nov, Valio answers with what it has for Monday (availableDate 16 Nov): a late offer (E3).
+      const date = requestedDate === '2026-11-15' ? '2026-11-16' : requestedDate;
+      const r = JSON.parse(snap.get(`${ep}|${id}|${date}`) ?? (ep === 'price'
         ? JSON.stringify({ productId: id, quantity: 1, error: true, netPriceFound: false })
         : JSON.stringify({ productId: id, salesBlock: false, scheduleLines: [] })));
       if (ep === 'price' && id === bump && r.catalogPrice) r.catalogPrice.value += 0.1;
@@ -45,7 +47,7 @@ const call = async (token: string | null, method: string, path: string, body?: u
   });
   return { status: res.status, body: (await res.json()) as any };
 };
-const MILK = { site: 'Hotel Kaisla Helsinki', deliver_by: '2026-11-16', items: [{ need: 'maito', quantity: 1000, unit: 'l' }], diets: ['lactose_free'] };
+const MILK = { site: 'Hotel Kaisla Helsinki', deliver_by: '2026-11-16', items: [{ need: 'maito', quantity: 1000, unit: 'l' }], diets: ['lactose_free'], source_text: '1000 l lactose-free milk by Monday' };
 const failed = (p: any) => p.policy_verdict.rules.filter((r: any) => !r.ok).map((r: any) => r.rule).sort();
 
 test('OpenAPI is public, everything else needs a token', async () => {
@@ -57,28 +59,36 @@ test('OpenAPI is public, everything else needs a token', async () => {
   assert.equal((await call('nope', 'GET', '/policy')).status, 401);
 });
 
-test('scene 1–4: agent proposes only stock Valio confirms, cannot approve, human weighs the cheaper unconfirmed option, approves', async () => {
+test('scene 1–4: best option with unconfirmed stock flagged, a sure-delivery option next to it; agent cannot approve; human picks, confirms, approves', async () => {
   const created = await call('demo-agent', 'POST', '/proposals', MILK);
   assert.equal(created.status, 200);
   const p = created.body;
   assert.equal(p.status, 'needs_review');
   assert.equal(p.requires_human, true);
-  assert.deepEqual(failed(p), ['agent_may_finalise', 'max_line_eur', 'max_order_eur']);
-  const parts = p.items[0].allocation; // sure to arrive: 384 + 51 + 565 l across three products with confirmed stock
-  assert.deepEqual(parts.map((l: any) => [l.id, l.sales_units]), [['469363', 384], ['462775', 51], ['463380', 565]]);
-  assert.ok(parts.every((l: any) => !l.flags.includes('E5') && l.flags.includes('E4')));
-  assert.equal(p.total_cents, 258064);
+  // Best option: Eila, cheapest, but Valio reports no amount for it → a person accepts it or not (policy, off by default).
+  assert.deepEqual(failed(p), ['agent_may_finalise', 'confirmed_stock', 'max_line_eur', 'max_order_eur']);
+  assert.deepEqual(p.items[0].allocation.map((l: any) => [l.id, l.sales_units, l.flags]), [['464306', 1000, ['E5']]]);
+  assert.equal(p.total_cents, 101000);
+  // Next to it, the same 1,000 l from confirmed stock only: 384 + 51 + 565 l across three products.
+  const sure = p.items[0].sure_option;
+  assert.deepEqual(sure.lines.map((l: any) => [l.id, l.units]), [['469363', 384], ['462775', 51], ['463380', 565]]);
+  assert.deepEqual([sure.cost_cents, sure.extra_cents, sure.shortfall], [258064, 157064, 0]);
 
   assert.equal((await call('demo-agent', 'POST', `/proposals/${p.id}/decision`, { decision: 'approve' })).status, 403);
 
-  // The cheaper Eila has no confirmed stock: a person may choose it, but then it is a hard rule. Back to the agent's pick.
-  const cheap = (await call('demo-owner', 'PATCH', `/proposals/${p.id}`, { item: 0, choose: '464306' })).body;
-  assert.ok(failed(cheap).includes('confirmed_stock'));
-  assert.equal(cheap.total_cents, 101000);
-  const rev = (await call('demo-owner', 'PATCH', `/proposals/${p.id}`, { item: 0 })).body;
-  assert.deepEqual(rev.items[0].allocation.map((l: any) => l.id), parts.map((l: any) => l.id));
+  const rev = (await call('demo-owner', 'PATCH', `/proposals/${p.id}`, { item: 0, confirmed_only: true })).body; // one click
+  const parts = rev.items[0].allocation;
+  assert.deepEqual(parts.map((l: any) => l.id), sure.lines.map((l: any) => l.id));
+  assert.ok(parts.every((l: any) => !l.flags.includes('E5')));
+  assert.ok(!failed(rev).includes('confirmed_stock'));
+  assert.equal(rev.items[0].sure_option, null);
 
   bump = parts[0].id; // price moves before approval → back to review with the difference (§7.3)
+  // Before approving, a person confirms the request was understood (no approvals yet, so no trust to skip it).
+  const early = await call('demo-owner', 'POST', `/proposals/${p.id}/decision`, { decision: 'approve' });
+  assert.deepEqual([early.status, early.body.needs_confirmation], [409, true]);
+  assert.equal((await call('demo-agent', 'POST', `/proposals/${p.id}/confirm`)).status, 403);
+  assert.equal((await call('demo-owner', 'POST', `/proposals/${p.id}/confirm`)).body.confirmation.required, false);
   const stale = await call('demo-owner', 'POST', `/proposals/${p.id}/decision`, { decision: 'approve' });
   bump = null;
   assert.equal(stale.status, 409);
@@ -91,7 +101,7 @@ test('scene 1–4: agent proposes only stock Valio confirms, cannot approve, hum
   assert.equal((await call('demo-owner', 'PATCH', `/proposals/${p.id}`, { item: 0, quantity: 5 })).status, 409);
 
   const events = (await call('demo-owner', 'GET', `/audit?proposal=${p.id}`)).body.map((e: any) => e.event);
-  assert.deepEqual(events, ['created', 'policy_verdict', 'revised', 'policy_verdict', 'revised', 'policy_verdict', 'revalidation_failed', 'approved']);
+  assert.deepEqual(events, ['created', 'policy_verdict', 'revised', 'policy_verdict', 'request_confirmed', 'revalidation_failed', 'approved']);
 
   // Scene 5: export. The agent may not export what needed a human (hard rule 2); the approver may.
   assert.equal((await app.request(`/proposals/${p.id}/export`, { headers: { authorization: 'Bearer demo-agent' } })).status, 403);
@@ -108,27 +118,50 @@ test('policy: agent may finish routine orders within limits; an agent key can on
   const loose = { agent_may_finalise: true, max_order_eur: 3000, max_line_eur: 3000 };
   assert.equal((await call('demo-agent', 'PUT', '/policy', loose)).status, 403); // only a person sets the policy
   assert.equal((await call('demo-owner', 'PUT', '/policy', loose)).status, 200);
-  // Autonomy covers routine orders only: one approved milk order so far, three are needed.
+  // Autonomy covers routine orders only: one approved milk order so far, three are needed. Until then a person sees
+  // the best option (unconfirmed Eila) with the sure one next to it.
   for (let i = 0; i < 2; i++) {
     const p = (await call('demo-agent', 'POST', '/proposals', MILK)).body;
-    assert.deepEqual(failed(p), ['routine_order']);
+    assert.deepEqual(failed(p), ['confirmed_stock', 'routine_order']);
+    await call('demo-owner', 'POST', `/proposals/${p.id}/confirm`);
     assert.equal((await call('demo-owner', 'POST', `/proposals/${p.id}/decision`, { decision: 'approve' })).status, 200);
   }
+  // Routine now: finishing alone, the agent takes the sure-delivery option, never the unconfirmed one.
   const auto = (await call('demo-agent', 'POST', '/proposals', MILK)).body;
   assert.equal(auto.status, 'auto_approved');
   assert.equal(auto.requires_human, false);
+  assert.deepEqual(auto.items[0].allocation.map((l: any) => l.id), ['469363', '462775', '463380']);
   assert.equal((await app.request(`/proposals/${auto.id}/export`, { headers: { authorization: 'Bearer demo-agent' } })).status, 200);
 
   db.prepare("UPDATE tokens SET limits = ? WHERE token = 'demo-agent'").run(JSON.stringify({ max_order_eur: 100, agent_may_finalise: true }));
   const tight = (await call('demo-agent', 'POST', '/proposals', MILK)).body;
   db.prepare("UPDATE tokens SET limits = NULL WHERE token = 'demo-agent'").run();
   assert.equal(tight.status, 'needs_review');
-  assert.deepEqual(failed(tight), ['max_order_eur']);
+  assert.deepEqual(failed(tight), ['confirmed_stock', 'max_order_eur']); // sure option over its limit too: the person decides
 
-  db.prepare("UPDATE customers SET agents_enabled = 0 WHERE id = 'kaisla'").run(); // kill switch
+  // The owner accepts products Valio reports no amount for: the agent keeps the cheapest (Eila) and finishes alone.
+  await call('demo-owner', 'PUT', '/policy', { ...loose, allow_unconfirmed_stock: true });
+  const eila = (await call('demo-agent', 'POST', '/proposals', MILK)).body;
+  assert.deepEqual([eila.status, eila.items[0].allocation.map((l: any) => l.id), eila.total_cents], ['auto_approved', ['464306'], 101000]);
+  // An agent that leaves the person's words out cannot skip the quantity check.
+  const { source_text, ...silent } = MILK;
+  assert.deepEqual(failed((await call('demo-agent', 'POST', '/proposals', silent)).body), ['matches_request_text']);
+  assert.equal((await call('demo-owner', 'POST', '/proposals', silent)).body.policy_verdict.rules.some((r: any) => r.rule === 'matches_request_text'), false);
+
+  // Kill switch: only a person flips it; every agent key of the customer answers 403 while it is off.
+  assert.equal((await call('demo-agent', 'PUT', '/agents', { enabled: false })).status, 403);
+  assert.equal((await call('demo-owner', 'PUT', '/agents', { enabled: false })).body.enabled, false);
   assert.equal((await call('demo-agent', 'POST', '/proposals', MILK)).status, 403);
-  db.prepare("UPDATE customers SET agents_enabled = 1 WHERE id = 'kaisla'").run();
+  assert.equal((await call('demo-owner', 'PUT', '/agents', { enabled: true })).status, 200);
+  assert.equal((await call('demo-agent', 'GET', '/agents')).body.enabled, true);
   await call('demo-owner', 'PUT', '/policy', {});
+});
+
+test('no date given: the first date the order can still be placed for, not blindly tomorrow', async () => {
+  const { deliver_by, ...undated } = MILK;
+  const p = (await call('demo-owner', 'POST', '/proposals', undated)).body;
+  assert.deepEqual([p.deliver_by, p.deliver_by_defaulted], ['2026-11-16', true]);
+  assert.ok(!failed(p).includes('on_time'));
 });
 
 test('limits found in the source text are added even if the agent left them out', async () => {
@@ -146,7 +179,7 @@ test('trust: a quantity not in the text, or far from the usual one, needs a huma
   // The agent read "100" as 1000: plausible, under every limit, but not what was written.
   const typo = (await call('demo-agent', 'POST', '/proposals', { ...MILK, source_text: '100 l lactose-free milk by Monday' })).body;
   assert.equal(typo.status, 'needs_review');
-  assert.deepEqual(failed(typo), ['matches_request_text']);
+  assert.ok(failed(typo).includes('matches_request_text')); // even the sure-delivery option cannot clear it
   assert.deepEqual(typo.read_back.items, [{ quantity_in_text: false, words: 'milk' }]);
 
   const { evaluate, PolicySchema: P } = await import('./policy.ts');
@@ -192,6 +225,22 @@ test('recipe: scaled to portions, the named Valio product preferred, every quant
   }
 });
 
+test('correcting the request re-plans the same proposal, clears the confirmation, and is a human change', async () => {
+  const p = (await call('demo-owner', 'POST', '/proposals', { ...MILK, source_text: '1000 l lactose-free milk by Monday' })).body;
+  await call('demo-owner', 'POST', `/proposals/${p.id}/confirm`);
+  assert.ok((await call('demo-owner', 'GET', `/proposals/${p.id}`)).body.confirmation.done);
+  assert.equal((await call('demo-agent', 'PATCH', `/proposals/${p.id}/request`, { deliver_by: '2026-11-18' })).status, 403);
+  const fixed = (await call('demo-owner', 'PATCH', `/proposals/${p.id}/request`, { items: [{ need: 'maito', quantity: 100, unit: 'l' }] })).body;
+  assert.equal(fixed.id, p.id);
+  assert.equal(fixed.items[0].item.quantity, 100);
+  assert.equal(fixed.confirmation.done, null);
+  assert.deepEqual(fixed.request.diets, ['lactose_free']); // limits found in the words stay
+  assert.ok(failed(fixed).includes('matches_request_text')); // 100 is not in the words: a person confirms that
+  const events = (await call('demo-owner', 'GET', `/audit?proposal=${p.id}`)).body.map((e: any) => e.event);
+  assert.deepEqual(events.slice(-2), ['request_corrected', 'policy_verdict']);
+  await call('demo-owner', 'POST', `/proposals/${p.id}/decision`, { decision: 'reject' });
+});
+
 test('a date in the past asks for clarification', async () => {
   const r = await call('demo-owner', 'POST', '/proposals', { ...MILK, deliver_by: '2026-11-01' });
   assert.equal(r.status, 400);
@@ -219,11 +268,15 @@ test('hard rules: alcohol, policy errors and agent limits never loosen anything'
 
 test('trust ladder: 3 unchanged approvals suggest autonomy, learned from what was accepted; a rejected autonomous order revokes it', async () => {
   const create = async () => (await call('demo-agent', 'POST', '/proposals', MILK)).body;
-  const decide = (id: string, decision: string) => call('demo-owner', 'POST', `/proposals/${id}/decision`, { decision });
+  const decide = async (id: string, decision: string) => {
+    if (decision === 'approve' && (await call('demo-owner', 'GET', `/proposals/${id}`)).body.confirmation.required) await call('demo-owner', 'POST', `/proposals/${id}/confirm`);
+    return call('demo-owner', 'POST', `/proposals/${id}/decision`, { decision });
+  };
   await call('demo-owner', 'PUT', '/policy', { allow_split: false }); // so every milk proposal (a split) asks about splitting
   await decide((await create()).id, 'reject'); // a clean streak
   const approveNew = async (revise = false) => {
     const p = await create();
+    await call('demo-owner', 'PATCH', `/proposals/${p.id}`, { item: 0, confirmed_only: true }); // the agent's own offer: not a fix
     if (revise) await call('demo-owner', 'PATCH', `/proposals/${p.id}`, { item: 0, quantity: 900 });
     assert.equal((await decide(p.id, 'approve')).status, 200);
   };
@@ -232,8 +285,10 @@ test('trust ladder: 3 unchanged approvals suggest autonomy, learned from what wa
   await approveNew();
   const t = (await call('demo-owner', 'GET', '/trust')).body;
   assert.equal(t.streak, 3);
+  const next = await create(); // trusted now: no "is this what you meant?" step
+  assert.deepEqual([next.confirmation.required, next.confirmation.skipped_by_trust], [false, true]);
   assert.match(t.suggestion.text, /3 proposals in a row.*split across products/);
-  assert.deepEqual(t.suggestion.learned, ['allow_split']); // accepted every time → learned; stock is a hard rule, never learned
+  assert.deepEqual(t.suggestion.learned, ['allow_split']); // accepted every time → learned; unconfirmed stock was never accepted here
   const s = t.suggestion.policy;
   assert.deepEqual([s.agent_may_finalise, s.max_order_eur, s.max_line_eur, s.allow_split], [true, 2600, 2600, true]);
   assert.equal((await call('demo-owner', 'GET', '/policy')).body.agent_may_finalise, false); // nothing changes by itself

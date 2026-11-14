@@ -37,8 +37,25 @@ export const PurchaseRequest = z.object({
   source_text: z.string().max(5000).optional(),
 }).openapi('PurchaseRequest');
 // `recipe` is set only by POST /recipes/{id}/plan: where each item's quantity came from (the read-back for recipes).
-type RecipeRef = { id: string; name: string; url: string; yield: number; portions: number; from: string[]; skipped: { text: string; reason: string }[] };
-type Request = z.infer<typeof PurchaseRequest> & { deliver_by: string; deliver_by_defaulted?: boolean; recipe?: RecipeRef };
+type RecipeRef = {
+  id: string; name: string; url: string; yield: number; portions: number; pantry?: string[];
+  from: string[]; skipped: { text: string; reason: string }[];
+};
+// `confirmed`: a person said "this is what I meant" (POST /proposals/{id}/confirm). Cleared when the request is corrected.
+// `from_agent`: created by an agent key, so the original text is required for the quantity check (policy.ts).
+type Request = z.infer<typeof PurchaseRequest> & {
+  deliver_by: string; deliver_by_defaulted?: boolean; recipe?: RecipeRef; confirmed?: { by: string; at: string }; from_agent?: boolean;
+};
+const TRUST_THRESHOLD = 3; // unchanged approvals in a row: suggest autonomy (§8.4) and skip the request confirmation
+
+const Correction = z.object({
+  items: PurchaseRequest.shape.items.optional(),
+  deliver_by: DateStr.optional(),
+  diets: z.array(Diet).optional(),
+  exclude_allergens: z.array(z.string().regex(/^[A-Z]{2}$/)).optional(),
+  priorities: z.enum(Object.keys(PRESETS) as [Priorities, ...Priorities[]]).optional(),
+  portions: z.number().int().min(1).max(5000).optional().openapi({ description: 'Recipe proposals: scale the recipe again' }),
+}).openapi('Correction');
 
 const Revision = z.object({
   item: z.number().int().min(0),
@@ -115,8 +132,31 @@ export function createApp(db: DatabaseSync) {
     rejected: 'Rejected. Nothing will be ordered.', expired: 'Expired: an order cut-off passed. Create a new proposal.',
     exported: 'Exported for webshop import.',
   };
+  // Unchanged human approvals in a row, newest streak only (§8.4). A human revision, correction or rejection ends it.
+  const streakOf = (customer: string): Verdict[] => {
+    const rows = db.prepare(
+      `SELECT a.proposal, a.event, a.actor, a.data, p.verdict FROM audit a JOIN proposals p ON p.id = a.proposal
+       WHERE a.customer = ? AND a.event IN ('revised', 'request_corrected', 'approved', 'rejected') ORDER BY a.seq`,
+    ).all(customer) as any[];
+    const changed = new Set<string>();
+    let streak: Verdict[] = [];
+    for (const r of rows) {
+      // Taking the sure-delivery option the agent itself offered is a choice between its plans, not a fix of them.
+      const tookOffer = r.event === 'revised' && (({ item, ...rest }) => JSON.stringify(rest) === '{"confirmed_only":true}')(JSON.parse(r.data).revision ?? {});
+      if (['revised', 'request_corrected'].includes(r.event) && !r.actor.startsWith('agent:') && !tookOffer) changed.add(r.proposal);
+      else if (r.event === 'rejected' || (r.event === 'approved' && changed.has(r.proposal))) streak = [];
+      else if (r.event === 'approved') streak.push(JSON.parse(r.verdict));
+    }
+    return streak;
+  };
+  // A person confirms the request was understood before approving, until they have approved enough without fixes.
+  const confirmationOf = (p: any) => {
+    const trusted = streakOf(p.customer).length >= TRUST_THRESHOLD;
+    return { required: p.status === 'needs_review' && !trusted && !p.request.confirmed, done: p.request.confirmed ?? null,
+      skipped_by_trust: trusted && !p.request.confirmed, threshold: TRUST_THRESHOLD };
+  };
   const view = (p: any) => ({
-    id: p.id, status: p.status, site: p.request.site, deliver_by: p.request.deliver_by,
+    id: p.id, status: p.status, confirmation: confirmationOf(p), site: p.request.site, deliver_by: p.request.deliver_by,
     deliver_by_defaulted: !!p.request.deliver_by_defaulted, total_cents: p.verdict.total_cents,
     requires_human: p.verdict.requires_human, next: NEXT[p.status as Status], policy_verdict: p.verdict,
     // Full excluded lists stay in the audit record; responses carry the first 20 so agents' context stays small.
@@ -138,7 +178,7 @@ export function createApp(db: DatabaseSync) {
     return h;
   };
   const verdictFor = (r: Request, items: any[], a: Actor) =>
-    evaluate(db, items, { exclude_allergens: r.exclude_allergens, diets: r.diets, labels_required: r.labels_required, budget_eur: r.budget_eur, source_text: r.source_text },
+    evaluate(db, items, { exclude_allergens: r.exclude_allergens, diets: r.diets, labels_required: r.labels_required, budget_eur: r.budget_eur, source_text: r.source_text, from_agent: r.from_agent && !r.recipe },
       effectivePolicy(policyOf(a.customer), a.role === 'agent' ? a.limits : null), historyOf(a.customer));
 
   // --- catalogue and offers ----------------------------------------------------------------------------------------
@@ -172,7 +212,8 @@ export function createApp(db: DatabaseSync) {
 
   // --- proposals ---------------------------------------------------------------------------------------------------
   // Every way in (free text, form, agent, recipe) ends here: same limits, planning, policy and decision record.
-  const createProposal = async (a: Actor, input: z.infer<typeof PurchaseRequest>, recipe?: RecipeRef) => {
+  // Request + planned items + verdict: shared by creating a proposal and correcting one.
+  const planRequest = async (a: Actor, input: z.infer<typeof PurchaseRequest>, recipe?: RecipeRef, fromAgent = a.role === 'agent') => {
     const today = helsinkiToday();
     if (input.deliver_by && input.deliver_by < today)
       return { error: 'clarification needed', question: `The delivery date ${input.deliver_by} is in the past. Which date do you need?` };
@@ -181,15 +222,38 @@ export function createApp(db: DatabaseSync) {
     const r: Request = {
       ...input, deliver_by: input.deliver_by ?? addDays(today, 1), deliver_by_defaulted: !input.deliver_by,
       diets: [...new Set([...input.diets, ...found.diets])], exclude_allergens: [...new Set([...input.exclude_allergens, ...found.exclude_allergens])],
-      ...(recipe ? { recipe } : {}),
+      ...(recipe ? { recipe } : {}), ...(fromAgent ? { from_agent: true } : {}),
     };
     // Three items at a time: a recipe has up to ten, one by one with the model takes half a minute. 429s are retried.
-    const items: any[] = new Array(r.items.length);
-    let next = 0;
-    await Promise.all(Array.from({ length: Math.min(3, r.items.length) }, async () => {
-      while (next < r.items.length) { const i = next++; items[i] = await plan(r, i); }
-    }));
-    const verdict = verdictFor(r, items, a);
+    const planAll = async () => {
+      const items: any[] = new Array(r.items.length);
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(3, r.items.length) }, async () => {
+        while (next < r.items.length) { const i = next++; items[i] = await plan(r, i); }
+      }));
+      return items;
+    };
+    let items = await planAll();
+    // §6: no date given → the first date every item can still be ordered for (options with a passed cut-off are
+    // already dropped), not blindly "tomorrow". One more round of offers, only when tomorrow turns out too early.
+    if (r.deliver_by_defaulted) {
+      const first = items.map((it) => it.options.map((o: any) => o.offer.available_date).filter(Boolean).sort()[0]).filter(Boolean).sort().at(-1);
+      if (first && first > r.deliver_by) { r.deliver_by = first; items = await planAll(); }
+    }
+    return { r, items, verdict: verdictFor(r, items, a) };
+  };
+  const createProposal = async (a: Actor, input: z.infer<typeof PurchaseRequest>, recipe?: RecipeRef) => {
+    const planned = await planRequest(a, input, recipe);
+    if ('question' in planned) return planned;
+    let { r, items, verdict } = planned;
+    // An agent finishing alone never takes the risk of unconfirmed stock: it switches to the sure-delivery option and
+    // keeps it only if that passes every check. Otherwise the person sees the best option with the sure one next to it.
+    const pol = effectivePolicy(policyOf(a.customer), a.role === 'agent' ? a.limits : null);
+    if (a.role === 'agent' && pol.agent_may_finalise && verdict.requires_human && items.some((it) => it.sure_option)) {
+      const sure = await Promise.all(items.map((it, i) => (it.sure_option ? plan(r, i, { confirmed_only: true }) : it)));
+      const v = verdictFor(r, sure, a);
+      if (!v.requires_human) { items = sure; verdict = v; }
+    }
     const p = { id: randomUUID(), status: (verdict.requires_human ? 'needs_review' : 'auto_approved') as Status, request: r, items, verdict };
     const at = new Date().toISOString();
     db.prepare('INSERT INTO proposals VALUES (?,?,?,?,?,?,?,?,?)').run(
@@ -230,7 +294,7 @@ export function createApp(db: DatabaseSync) {
     const out = await createProposal(c.get('actor'), {
       ...rest, labels_required: [], budget_eur: null,
       items: scaled.items.map(({ need, quantity, unit, product }) => ({ need, quantity, unit, ...(product ? { product } : {}) })),
-    }, { id: recipe.id, name: recipe.name, url: recipe.url, yield: recipe.yield, portions, from: scaled.items.map((i) => i.from), skipped: scaled.skipped });
+    }, { id: recipe.id, name: recipe.name, url: recipe.url, yield: recipe.yield, portions, pantry, from: scaled.items.map((i) => i.from), skipped: scaled.skipped });
     return 'question' in out ? c.json(out, 400) : c.json(out, 200);
   });
 
@@ -269,6 +333,48 @@ export function createApp(db: DatabaseSync) {
     return c.json(view(load(p.id, a)), 200);
   });
 
+  app.openapi(route('post', '/proposals/{id}/confirm', 'A person confirms the request was understood as meant (people only)', { params: IdParam }), (c) => {
+    const a = c.get('actor');
+    if (a.role === 'agent') return c.json({ error: 'only a person can confirm what they meant' }, 403);
+    const p = load(c.req.valid('param').id, a);
+    if (!p) return c.json({ error: 'no such proposal' }, 404);
+    if (!['needs_review', 'auto_approved'].includes(p.status)) return c.json({ error: `cannot confirm a ${p.status} proposal` }, 409);
+    p.request.confirmed = { by: `${a.role}:${a.name}`, at: new Date().toISOString() };
+    save(p);
+    audit(p.id, a, 'request_confirmed', {});
+    return c.json(view(load(p.id, a)), 200);
+  });
+
+  app.openapi(route('patch', '/proposals/{id}/request', 'Correct what was asked (items, date, limits, priorities, portions) and plan again (people only)', {
+    params: IdParam, ...body(Correction),
+  }), async (c) => {
+    const a = c.get('actor');
+    if (a.role === 'agent') return c.json({ error: 'agents revise lines; correcting what was meant is for a person' }, 403);
+    const p = load(c.req.valid('param').id, a);
+    if (!p) return c.json({ error: 'no such proposal' }, 404);
+    if (!['needs_review', 'auto_approved'].includes(p.status)) return c.json({ error: `cannot correct a ${p.status} proposal` }, 409);
+    const fix = c.req.valid('json'), old = p.request;
+    let items = fix.items ?? old.items, recipe = old.recipe;
+    if (recipe && fix.portions) {
+      const source = loadRecipes().find((x) => x.id === recipe!.id);
+      if (!source) return c.json({ error: 'the recipe is no longer available' }, 409);
+      const scaled = scaleRecipe(source, fix.portions, recipe.pantry ?? []);
+      items = scaled.items.map(({ need, quantity, unit, product }) => ({ need, quantity, unit, ...(product ? { product } : {}) }));
+      recipe = { ...recipe, portions: fix.portions, from: scaled.items.map((i) => i.from), skipped: scaled.skipped };
+    }
+    const planned = await planRequest(a, {
+      site: old.site, source_text: old.source_text, labels_required: old.labels_required, budget_eur: old.budget_eur, items,
+      deliver_by: fix.deliver_by ?? (old.deliver_by_defaulted ? undefined : old.deliver_by),
+      diets: fix.diets ?? old.diets, exclude_allergens: fix.exclude_allergens ?? old.exclude_allergens, priorities: fix.priorities ?? old.priorities,
+    }, recipe, !!old.from_agent);
+    if ('question' in planned) return c.json(planned, 400);
+    Object.assign(p, { request: planned.r, items: planned.items, verdict: planned.verdict, status: planned.verdict.requires_human ? 'needs_review' : 'auto_approved' });
+    save(p);
+    audit(p.id, a, 'request_corrected', { correction: fix, request: planned.r, items: planned.items });
+    audit(p.id, a, 'policy_verdict', { status: p.status, ...p.verdict });
+    return c.json(view(load(p.id, a)), 200);
+  });
+
   app.openapi(route('post', '/proposals/{id}/decision', 'Approve or reject (people only, never an agent)', {
     params: IdParam, ...body(Decision),
   }), async (c) => {
@@ -278,6 +384,8 @@ export function createApp(db: DatabaseSync) {
     if (!p) return c.json({ error: 'no such proposal' }, 404);
     if (!['needs_review', 'auto_approved'].includes(p.status)) return c.json({ error: `cannot decide a ${p.status} proposal` }, 409);
     const { decision, note } = c.req.valid('json');
+    if (decision === 'approve' && confirmationOf(p).required)
+      return c.json({ error: 'confirm the request first: is this what was meant?', needs_confirmation: true }, 409);
     if (decision === 'reject') {
       // Trust is lost faster than it is earned: rejecting an order the agent finished alone switches autonomy off.
       if (p.status === 'auto_approved') {
@@ -293,9 +401,11 @@ export function createApp(db: DatabaseSync) {
     // §7.3: re-check the chosen lines before approval; any change sends it back with the difference.
     const diffs: { id: string; what: string; before: unknown; after: unknown }[] = [];
     let expired = false;
+    const stale: string[] = []; // API trouble: the re-check ran against cached offers, and the record says so
     for (const it of p.items) {
       if (!it.allocation.length) continue;
-      const { offers } = await checkOffers(db, it.allocation.map((l: any) => l.id), p.request.deliver_by);
+      const { offers, errors } = await checkOffers(db, it.allocation.map((l: any) => l.id), p.request.deliver_by);
+      stale.push(...errors);
       it.allocation.forEach((l: any, i: number) => {
         const now = offers[i], before = it.options.find((o: any) => o.id === l.id).offer;
         if (now.price_cents !== before.price_cents) diffs.push({ id: l.id, what: 'price_cents', before: before.price_cents, after: now.price_cents });
@@ -311,7 +421,7 @@ export function createApp(db: DatabaseSync) {
       return c.json({ error: 'offers changed since the proposal was made; review the difference', diffs, proposal: view(load(p.id, a)) }, 409);
     }
     p.status = 'approved'; save(p);
-    audit(p.id, a, 'approved', { note, revalidated: true });
+    audit(p.id, a, 'approved', { note, revalidated: !stale.length, ...(stale.length ? { revalidation_errors: stale } : {}) });
     return c.json(view(load(p.id, a)), 200);
   });
 
@@ -342,27 +452,19 @@ export function createApp(db: DatabaseSync) {
   // stored; a human revision or a rejection resets it. It only suggests: the policy changes when the owner saves it.
   app.openapi(route('get', '/trust', 'Unchanged approvals in a row and a policy suggestion'), (c) => {
     const a = c.get('actor');
-    const THRESHOLD = 3;
-    const rows = db.prepare(
-      `SELECT a.proposal, a.event, a.actor, p.verdict FROM audit a JOIN proposals p ON p.id = a.proposal
-       WHERE a.customer = ? AND a.event IN ('revised', 'approved', 'rejected') ORDER BY a.seq`,
-    ).all(a.customer) as any[];
-    const changed = new Set<string>();
-    let streak: Verdict[] = [];
-    for (const r of rows) {
-      if (r.event === 'revised' && !r.actor.startsWith('agent:')) changed.add(r.proposal);
-      else if (r.event === 'rejected' || (r.event === 'approved' && changed.has(r.proposal))) streak = [];
-      else if (r.event === 'approved') streak.push(JSON.parse(r.verdict));
-    }
+    const THRESHOLD = TRUST_THRESHOLD;
+    const streak = streakOf(a.customer);
     const policy = policyOf(a.customer);
     const limit = Math.ceil(Math.max(0, ...streak.map((v) => v.total_cents ?? 0)) / 100 / 50) * 50; // round up to €50
     // Learn from what the person accepted every time: a soft yes/no rule that failed in every approval of the streak.
-    // Money limits come from the totals above; hard rules (stock, allergens, quantities, …) are never loosened.
+    // Money limits come from the totals above; hard rules (allergens, quantities, …) are never loosened.
     const acceptedEvery = (rule: string) => streak.every((v) => v.rules.some((x) => x.rule === rule && !x.ok));
-    const learned = (['allow_split'] as const).filter((k) => !policy[k] && acceptedEvery(k));
+    const SOFT = { allow_split: 'allow_split', allow_unconfirmed_stock: 'confirmed_stock' } as const; // setting → its rule
+    const learned = (Object.keys(SOFT) as (keyof typeof SOFT)[]).filter((k) => !policy[k] && acceptedEvery(SOFT[k]));
     const suggestion = streak.length >= THRESHOLD && !policy.agent_may_finalise
       ? { text: `You approved ${streak.length} proposals in a row without changing them. Let the agent finish routine orders up to €${limit} on its own`
-            + `${learned.includes('allow_split') ? ', including orders split across products, as you accepted each time' : ''}?`,
+            + `${learned.includes('allow_split') ? ', including orders split across products, as you accepted each time' : ''}`
+            + `${learned.includes('allow_unconfirmed_stock') ? ', including products Valio gives no stock amount for, as you accepted each time' : ''}?`,
           learned,
           policy: { ...policy, agent_may_finalise: true, max_order_eur: limit, max_line_eur: Math.max(policy.max_line_eur, limit),
             ...Object.fromEntries(learned.map((k) => [k, true])) } }
@@ -380,6 +482,19 @@ export function createApp(db: DatabaseSync) {
     db.prepare('UPDATE customers SET policy = ? WHERE id = ?').run(JSON.stringify(after), a.customer);
     audit(null, a, 'policy_changed', { before, after });
     return c.json(after, 200);
+  });
+
+  // Kill switch (§3): one click turns every agent key of this customer off (the auth middleware answers 403).
+  const agentsOn = (customer: string) => !!(db.prepare('SELECT agents_enabled FROM customers WHERE id = ?').get(customer) as any).agents_enabled;
+  app.openapi(route('get', '/agents', 'Are this customer\'s agent keys switched on?'), (c) => c.json({ enabled: agentsOn(c.get('actor').customer) }, 200));
+  app.openapi(route('put', '/agents', 'Kill switch: turn all agent keys of this customer on or off (people only)', body(z.object({ enabled: z.boolean() }))), (c) => {
+    const a = c.get('actor'), { enabled } = c.req.valid('json');
+    if (a.role === 'agent') return c.json({ error: 'agents cannot switch agents on or off' }, 403);
+    if (enabled !== agentsOn(a.customer)) {
+      db.prepare('UPDATE customers SET agents_enabled = ? WHERE id = ?').run(enabled ? 1 : 0, a.customer);
+      audit(null, a, enabled ? 'agents_enabled' : 'agents_disabled', {});
+    }
+    return c.json({ enabled }, 200);
   });
 
   app.openapi(route('get', '/audit', 'Decision records (append-only)', { query: z.object({ proposal: z.string().optional() }) }), (c) => {

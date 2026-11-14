@@ -10,6 +10,7 @@ export const PolicySchema = z.object({
   max_order_eur: z.number().min(0).default(500),
   max_line_eur: z.number().min(0).default(200),
   allow_split: z.boolean().default(true),
+  allow_unconfirmed_stock: z.boolean().default(false),
   max_over_best_price_pct: z.number().min(0).default(10),
 }).openapi('Policy');
 export type Policy = z.infer<typeof PolicySchema>;
@@ -46,7 +47,8 @@ const median = (xs: number[]) => { const s = [...xs].sort((a, b) => a - b); retu
 export const historyKey = (it: Pick<PlannedItem, 'category' | 'item'>) => `${it.category}|${it.item.unit}`;
 
 export function evaluate(
-  db: DatabaseSync, items: PlannedItem[], limits: Limits & { budget_eur?: number | null; source_text?: string }, policy: Policy,
+  db: DatabaseSync, items: PlannedItem[],
+  limits: Limits & { budget_eur?: number | null; source_text?: string; from_agent?: boolean }, policy: Policy,
   history: Map<string, number[]> = new Map(),
 ): Verdict {
   try {
@@ -74,6 +76,9 @@ export function evaluate(
       const off = items.filter((it) => !quantityInText(limits.source_text!, it.item.quantity));
       add('matches_request_text', true, !off.length, 'every quantity appears in the original text',
         `not in the original text: ${off.map((it) => `${it.item.quantity} ${it.item.unit} ${it.item.need}`).join(', ')}`);
+    } else if (limits.from_agent) {
+      // An agent that leaves the person's words out cannot skip the check: nothing to compare against → a human looks.
+      add('matches_request_text', true, false, '', 'not in the original text: the agent sent no original text (source_text) to check the quantities against');
     }
     const odd = items.flatMap((it) => {
       const past = history.get(historyKey(it)) ?? [];
@@ -82,9 +87,6 @@ export function evaluate(
       return x >= UNUSUAL || x <= 1 / UNUSUAL ? [`${it.item.need} ${it.item.quantity} ${it.item.unit}, usually ${+usual.toFixed(3)} ${it.item.unit} (${past.length} past orders)`] : [];
     });
     add('usual_quantity', true, !odd.length, 'quantities in line with past orders, or too few to compare', `unusual quantity, check for a typo: ${odd.join('; ')}`);
-    // Only orders sure to be delivered go through: a line Valio does not confirm stock for always needs a person.
-    const unknown = lines.filter(({ a }) => a.flags.includes('E5'));
-    add('confirmed_stock', true, !unknown.length, 'Valio confirms stock for every line', `stock not confirmed: ${ids(unknown)}`);
     if (limits.budget_eur != null)
       add('request_budget', true, total <= limits.budget_eur * 100, `${eur(total)} within budget €${limits.budget_eur}`, `${eur(total)} over budget €${limits.budget_eur}`);
 
@@ -95,6 +97,10 @@ export function evaluate(
     add('max_line_eur', false, !big.length, `every line ≤ €${policy.max_line_eur}`, `lines over €${policy.max_line_eur}: ${ids(big)}`);
     const split = items.filter((it) => it.allocation.length > 1);
     add('allow_split', false, policy.allow_split || !split.length, 'no split or splits allowed', `split items: ${split.map((it) => it.item.need).join(', ')}`);
+    // Valio reports no amount (>= 999999: "unknown, any quantity may be ordered"). Off by default: a person looks.
+    const unknown = lines.filter(({ a }) => a.flags.includes('E5'));
+    add('confirmed_stock', false, policy.allow_unconfirmed_stock || !unknown.length,
+      unknown.length ? 'policy accepts lines without a confirmed amount' : 'Valio confirms stock for every line', `stock not confirmed: ${ids(unknown)}`);
     // Reference: the cheapest option sure to arrive (an unconfirmed bargain is not a fair comparison).
     const reference = (it: PlannedItem) => {
       const sure = it.options.filter((o) => o.available !== null && o.available !== undefined && !o.late);

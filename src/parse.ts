@@ -60,7 +60,77 @@ function deliverBy(text: string): string | undefined {
   return undefined;
 }
 
-export function parseRequest(text: string) {
+type NumPart = [number, 'unit' | 'teen' | 'tens' | 'hundred' | 'thousand'];
+// Number words → digits, so spoken requests ("a thousand litres", "kaksisataa litraa", "tvåhundra liter") parse and
+// check like typed ones. Finnish and Swedish write numbers as one compound word, so each word is split into parts.
+const NUM_PARTS = ([
+  ...['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'].map((w, i) => [w, i, 'unit'] as const),
+  ...['ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'].map((w, i) => [w, 10 + i, 'unit'] as const),
+  ...['twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'].map((w, i) => [w, 20 + 10 * i, 'unit'] as const),
+  ['hundred', 100, 'hundred'], ['thousand', 1000, 'thousand'],
+  // Finnish: yksi … yhdeksän, -toista (11–19), -kymmentä (tens), sata/-sataa, tuhat/-tuhatta
+  ...['yksi', 'kaksi', 'kolme', 'neljä', 'viisi', 'kuusi', 'seitsemän', 'kahdeksan', 'yhdeksän'].map((w, i) => [w, 1 + i, 'unit'] as const),
+  ['kymmenen', 10, 'unit'], ['toista', 10, 'teen'], ['kymmentä', 10, 'tens'], ['sataa', 100, 'hundred'], ['sata', 100, 'hundred'],
+  ['tuhatta', 1000, 'thousand'], ['tuhat', 1000, 'thousand'],
+  // Swedish
+  ...['en', 'ett', 'två', 'tre', 'fyra', 'fem', 'sex', 'sju', 'åtta', 'nio'].map((w, i) => [w, i < 2 ? 1 : i, 'unit'] as const),
+  ...['tio', 'elva', 'tolv', 'tretton', 'fjorton', 'femton', 'sexton', 'sjutton', 'arton', 'nitton'].map((w, i) => [w, 10 + i, 'unit'] as const),
+  ...['tjugo', 'trettio', 'fyrtio', 'femtio', 'sextio', 'sjuttio', 'åttio', 'nittio'].map((w, i) => [w, 20 + 10 * i, 'unit'] as const),
+  ['hundra', 100, 'hundred'], ['tusen', 1000, 'thousand'],
+] as [string, number, NumPart[1]][]).sort((a, b) => b[0].length - a[0].length); // longest first: "seitsemän" before "sex"
+
+/** A word made only of number parts ("kaksisataaviisikymmentä" → kaksi, sataa, viisi, kymmentä), else null. */
+function numberParts(word: string): NumPart[] | null {
+  if (!word) return [];
+  for (const [part, v, kind] of NUM_PARTS) {
+    if (!word.startsWith(part)) continue;
+    const rest = numberParts(word.slice(part.length));
+    if (rest) return [[v, kind], ...rest];
+  }
+  return null;
+}
+/** "two hundred and fifty litres" → "250 litres". The person's own words are kept elsewhere; this is for parsing and checks. */
+export function numbersToDigits(text: string) {
+  const tokens = text.split(/(\s+)/);
+  const out: string[] = [];
+  let run: { total: number; cur: number; last: number } | null = null;
+  let held: string[] = []; // spaces (and "and") inside a number, dropped if the number goes on
+  const end = () => { if (run) out.push(String(run.total + run.cur)); run = null; out.push(...held); held = []; };
+  const apply = ([v, kind]: NumPart) => {
+    const r = run!;
+    if (kind === 'unit') { r.cur += v; r.last = v; }
+    else if (kind === 'teen') { r.cur += 10; r.last = 0; }                         // yksi|toista = 11
+    else if (kind === 'tens') { r.cur += r.last * 9; r.last = 0; }                 // kaksi|kymmentä = 20
+    else if (kind === 'hundred') { r.cur += (r.last || 1) * 100 - r.last; r.last = 0; }
+    else { r.total += (r.cur || 1) * 1000; r.cur = 0; r.last = 0; }
+  };
+  const nextWord = (i: number) => tokens.slice(i + 1).find((t) => t && !/^\s+$/.test(t)) ?? '';
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (!t) continue;
+    if (/^\s+$/.test(t)) { (run ? held : out).push(t); continue; }
+    const m = t.match(/^(\p{L}+(?:-\p{L}+)*)([^\p{L}]*)$/u);
+    const word = m?.[1].toLowerCase() ?? '';
+    const next = nextWord(i).toLowerCase();
+    if (run && word === 'and' && numberParts(next.replace(/[^\p{L}]/gu, ''))) { held.push(t); continue; } // two hundred and fifty
+    const parts = (word === 'a' || word === 'an') && /^(hundred|thousand)\b/.test(next) ? [[1, 'unit'] as NumPart]
+      : m ? word.split('-').reduce<NumPart[] | null>((acc, w) => { const p = numberParts(w); return acc && p && p.length ? [...acc, ...p] : null; }, [])
+      : null;
+    if (parts && parts.length) {
+      if (run) held = []; else run = { total: 0, cur: 0, last: 0 };
+      parts.forEach(apply);
+      if (m![2]) { end(); out.push(m![2]); }
+      continue;
+    }
+    end();
+    out.push(t);
+  }
+  end();
+  return out.join('');
+}
+
+export function parseRequest(raw: string) {
+  const text = numbersToDigits(raw);
   const items: { need: string; quantity: number; unit: Unit }[] = [];
   for (const m of text.matchAll(QTY)) {
     const rest = text.slice(m.index! + m[0].length);
@@ -69,7 +139,7 @@ export function parseRequest(text: string) {
   }
   const priorities: Priorities = /sustainab|co2|climate|ilmasto|vastuul|hållbar/i.test(text) ? 'sustainability'
     : /reliab|luotett|pålitlig/i.test(text) ? 'reliability_first' : 'price_and_availability';
-  const request = { deliver_by: deliverBy(text), items, priorities, source_text: text, ...detectLimits(text) };
+  const request = { deliver_by: deliverBy(text), items, priorities, source_text: raw, ...detectLimits(text) };
   const clarification = !items.length ? 'How much do you need, and in which unit (l, kg or pieces)?'
     : items.some((i) => !i.need) ? 'Which product do you mean?'
     : items.some((i) => !(i.quantity > 0)) ? 'The quantity must be more than zero. How much do you need?' : null;
@@ -105,7 +175,8 @@ export async function parseText(text: string) {
 }
 
 /** Is `q` a number the person wrote? 1,000 → 1000; 500 g → 0.5 kg and 5 dl → 0.5 l count, but only with those units. */
-export function quantityInText(text: string, q: number) {
+export function quantityInText(raw: string, q: number) {
+  const text = numbersToDigits(raw);
   const nums = [...text.matchAll(/(\d{1,3}(?:[ ,.]\d{3})+(?![.,]?\d)|\d+(?:[.,]\d+)?)\s*(g|grams?|grammaa?|ml|dl|cl)?\b/gi)].map((m) => {
     const n = number(m[1]), u = m[2]?.toLowerCase();
     return !u ? n : u === 'dl' ? n / 10 : u === 'cl' ? n / 100 : n / 1000;

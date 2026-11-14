@@ -21,9 +21,14 @@ const call = async (token: string, path: string, body: unknown) => {
 for (const litres of [150, 200, 180, 220, 200]) {
   const p = await call('demo-agent', '/proposals', {
     site: 'Hotel Kaisla Helsinki', deliver_by: '2026-11-16', items: [{ need: 'maito', quantity: litres, unit: 'l' }], diets: ['lactose_free'],
+    source_text: `${litres} l lactose-free milk by Monday`,
   });
+  // The kitchen takes the sure-delivery option each week (the agent's own offer: not a fix, so trust still grows).
+  await app.request(`/proposals/${p.id}`, { method: 'PATCH', body: JSON.stringify({ item: 0, confirmed_only: true }), headers: { authorization: 'Bearer demo-owner', 'content-type': 'application/json' } });
+  await call('demo-owner', `/proposals/${p.id}/confirm`, {}); // "this is what I meant"
   await call('demo-owner', `/proposals/${p.id}/decision`, { decision: 'approve', note: 'routine weekly order' });
-  console.log(`history: ${litres} l, ${p.items[0].allocation[0].id}, €${p.total_cents / 100}, approved unchanged`);
+  const done = (await (await app.request(`/proposals/${p.id}`, { headers: { authorization: 'Bearer demo-owner' } })).json()) as any;
+  console.log(`history: ${litres} l, sure delivery ${done.items[0].allocation.map((l: any) => l.id).join('+')}, €${done.total_cents / 100}, approved`);
 }
 const trust = await (await app.request('/trust', { headers: { authorization: 'Bearer demo-owner' } })).json() as any;
 console.log('trust ladder:', trust.suggestion?.text ?? `streak ${trust.streak}, no suggestion`);

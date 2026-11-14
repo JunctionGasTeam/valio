@@ -59,15 +59,11 @@ function contentOf(p: Product, o: Offer, unit: Unit): Pick<Option, 'content' | '
   return asL && { content: asL.content, content_flag: 'litre_as_kg' };
 }
 
-/**
- * Fill from the best option that is sure to arrive: confirmed stock on time first, then unconfirmed stock (E5, needs a
- * person), late (E3) last. Split across up to 3 products (§7.2).
- */
+/** Fill from the best on-time option, split up to 3 products, late (E3) options last (§7.2). */
 export function allocate<T extends Pick<Option, 'content' | 'lot' | 'available' | 'late'>>(qty: number, ranked: T[]) {
   let remaining = qty;
   const parts: { option: T; units: number; covers: number }[] = [];
-  const tier = (o: T) => (o.late ? 2 : o.available === null ? 1 : 0);
-  for (const o of [0, 1, 2].flatMap((t) => ranked.filter((o) => tier(o) === t))) {
+  for (const o of [...ranked.filter((o) => !o.late), ...ranked.filter((o) => o.late)]) {
     if (remaining <= 1e-9 || parts.length === 3) break;
     let units = unitsFor(remaining, o.content, o.lot);
     if (o.available !== null) units = Math.min(units, Math.floor(o.available / step(o.lot)) * step(o.lot));
@@ -113,6 +109,7 @@ export async function planItem(
     excluded: excluded.map((e) => ({ id: e.product.id, name: nameOf(e.product), reasons: e.reasons })),
     dropped: [] as { id: string; name: string; reasons: string[]; substitutes: string[] }[],
     options: [] as Option[], allocation: [] as Part[], shortfall: item.quantity,
+    sure_option: null as null | { lines: { id: string; name: string; units: number; sales_unit: string | null; late: boolean }[]; cost_cents: number; extra_cents: number; shortfall: number },
   };
   if (!matches.length) return { ...result, exceptions: ['E1', ...exceptions].sort() };
 
@@ -162,13 +159,20 @@ export async function planItem(
     result.named.used = parts.some((p) => p.option.id === named!.id);
     const opt = result.options.find((o) => o.id === named!.id);
     result.named.why ??= result.named.used ? null : result.dropped.find((d) => d.id === named!.id)?.reasons.join(', ')
-      ?? (overrides.choose || overrides.confirmed_only ? 'changed by a revision'
-        : opt?.available === null ? 'Valio does not confirm its stock, and products with confirmed stock cover the need' : 'not needed');
+      ?? (overrides.choose ? 'another product was chosen' : overrides.confirmed_only && opt?.available === null ? 'Valio does not confirm its stock' : 'not needed');
   }
-  // The price reference is the cheapest product sure to arrive (confirmed stock, on time), when there is one.
   const sure = result.options.filter((o) => o.available !== null && !o.late);
-  const best = Math.min(...(sure.length ? sure : result.options).map((o) => o.unit_price_cents));
-  const bestLabel = sure.length ? 'best confirmed' : 'best';
+  const best = Math.min(...result.options.map((o) => o.unit_price_cents));
+  // The best plan may rely on stock Valio does not confirm (E5). Next to it: the same need from confirmed stock only,
+  // so a person can pick sure delivery in one click, and an agent finishing alone always takes it (§7.2, §8.4).
+  if (!overrides.choose && !overrides.confirmed_only && parts.some((x) => x.option.available === null)) {
+    const alt = allocate(item.quantity, result.options.filter((o) => o.available !== null));
+    const cost = (ps: typeof parts) => ps.reduce((sum, x) => sum + Math.round(x.units * x.option.offer.price_cents!), 0);
+    if (alt.parts.length) result.sure_option = {
+      lines: alt.parts.map((x) => ({ id: x.option.id, name: x.option.name, units: x.units, sales_unit: x.option.offer.sales_unit, late: x.option.late })),
+      cost_cents: cost(alt.parts), extra_cents: cost(alt.parts) - cost(parts), shortfall: alt.shortfall,
+    };
+  }
   const u = item.unit === 'pcs' ? 'unit' : item.unit;
   result.allocation = parts.map(({ option: o, units, covers }, i) => {
     const flags = [
@@ -178,10 +182,10 @@ export async function planItem(
     flags.forEach((f) => f.startsWith('E') && exceptions.add(f));
     const facts = [
       // Rank among products sure to arrive, which is the pool the order is filled from.
-      sure.includes(o) && sure.length < result.options.length
+      overrides.confirmed_only && sure.includes(o) && sure.length < result.options.length
         ? `rank ${sure.indexOf(o) + 1} of ${sure.length} with confirmed stock, ${result.options.length} deliverable, score ${o.score.toFixed(2)}`
         : `rank ${rank.get(o.id)! + 1} of ${result.options.length} deliverable, score ${o.score.toFixed(2)}`,
-      `${eur(o.unit_price_cents)}/${u} (${bestLabel} ${eur(best)}/${u})`,
+      `${eur(o.unit_price_cents)}/${u} (best ${eur(best)}/${u})`,
       o.available === null ? 'amount not confirmed' : `${o.available} ${o.offer.sales_unit} available`,
       `delivers ${o.offer.available_date}`,
       ...(overrides.choose ? ['chosen by user'] : overrides.confirmed_only ? ['confirmed amounts only'] : []),
