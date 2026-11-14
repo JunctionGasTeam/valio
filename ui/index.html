@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trusted Trade Agents</title>
+  <style>
+    :root { --bg: #f7f7f5; --card: #fff; --fg: #1d1d1b; --muted: #6b6b66; --line: #e3e3de; --accent: #0b5cad;
+      --ok: #1e7b3c; --ok-bg: #e6f4ea; --bad: #b3261e; --bad-bg: #fbe9e7; --warn: #8a5a00; --warn-bg: #fff4dc; color-scheme: light; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #161615; --card: #1f1f1e; --fg: #ededea; --muted: #a3a39d; --line: #343432;
+      --accent: #6fb1f5; --ok: #7bd197; --ok-bg: #1d3325; --bad: #f2a29a; --bad-bg: #3d1f1c; --warn: #f0c060; --warn-bg: #3a2e14; color-scheme: dark; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    header { display: flex; gap: 16px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--card); flex-wrap: wrap; }
+    header nav { display: flex; gap: 12px; flex: 1; flex-wrap: wrap; }
+    main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+    a { color: var(--accent); }
+    h1 { font-size: 20px; margin: 0 0 4px; } h2 { font-size: 16px; margin: 0 0 8px; } h3 { font-size: 14px; margin: 12px 0 6px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-bottom: 14px; }
+    .muted { color: var(--muted); }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .grow { flex: 1; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { font-weight: 600; color: var(--muted); font-size: 12px; }
+    td.num, th.num { text-align: right; white-space: nowrap; }
+    .scroll { overflow-x: auto; }
+    .chip { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 12px; background: var(--line); margin: 1px 3px 1px 0; white-space: nowrap; }
+    .chip.ok { background: var(--ok-bg); color: var(--ok); } .chip.bad { background: var(--bad-bg); color: var(--bad); } .chip.warn { background: var(--warn-bg); color: var(--warn); }
+    .alert { padding: 10px 12px; border-radius: 6px; margin-bottom: 14px; }
+    .alert.bad { background: var(--bad-bg); color: var(--bad); } .alert.warn { background: var(--warn-bg); color: var(--warn); } .alert.ok { background: var(--ok-bg); color: var(--ok); }
+    button { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.danger { color: var(--bad); }
+    button:disabled { opacity: .5; cursor: default; }
+    input, select { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); }
+    label { display: inline-flex; gap: 6px; align-items: center; }
+    .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+    details summary { cursor: pointer; color: var(--muted); }
+    pre { font-size: 12px; overflow-x: auto; background: var(--bg); padding: 8px; border-radius: 6px; }
+    .rule { display: flex; gap: 8px; padding: 3px 0; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="./main.tsx"></script>
+</body>
+</html>

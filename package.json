@@ -1,0 +1,37 @@
+{
+  "name": "trusted-trade-agents",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=23.6"
+  },
+  "scripts": {
+    "db": "node --env-file-if-exists=.env src/db.ts",
+    "test": "node --test 'src/**/*.test.ts'",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p ui",
+    "start": "node --env-file-if-exists=.env src/api.ts",
+    "mcp": "node --disable-warning=ExperimentalWarning src/mcp.ts",
+    "ui": "vite ui",
+    "ui:build": "vite build ui",
+    "record": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/record.ts",
+    "demo": "vite build ui && DEMO_NOW=2026-11-14T12:00:00+0200 node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/api.ts",
+    "demo:reset": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/demo-reset.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "typescript": "^5.8.0",
+    "vite": "^8.3.8"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.8",
+    "@hono/zod-openapi": "^1.6.3",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "hono": "^4.13.18",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "zod": "^4.6.7"
+  }
+}

@@ -2,7 +2,7 @@
 
 An AI purchasing agent that buys food from Valio Aimo safely, openly and with the right human sign-off.
 
-Version 2.0-draft, 2026-11-14. Replaces v1.1 (kept as `context-v1.1-old.md`).
+Version 2.1-draft, 2026-11-14 (stack: TypeScript). Replaces v1.1 (kept as `context-v1.1-old.md`).
 Built on: the official challenge brief, the Valio Aimo dataset and mock API, organiser answers on Discord, and a read-only look at the live webshop (toimitustukku.valioaimo.fi).
 This file is the source of truth for behaviour. Change it first, then the code.
 
@@ -20,7 +20,7 @@ The wholesaler-facing part is an **open gateway**: the same functions are expose
 | Brief step | What we do |
 |---|---|
 | 1 Request | Free text or a form becomes a structured `PurchaseRequest` (section 6). Ambiguity → one clarification question, never a guess |
-| 2 Lookup | Local search over product data → short list (≤ 30 per item) → one price call and one availability call for that list only |
+| 2 Lookup | Local search over product data → short list (≤ 50 per item) → one price call and one availability call for that list only |
 | 3 Order | Quantities, sales units and a split across products or dates when needed. Prices are frozen from the price API with their validity |
 | 4 Approval | Policy check. Default: a human signs off every order. The customer can grant the agent more autonomy step by step (trust ladder, section 8.4) |
 
@@ -65,11 +65,11 @@ The wholesaler-facing part is an **open gateway**: the same functions are expose
 | `openapi.json` | mock API contract | — |
 
 Data quality that shapes the rules:
-- Allergens use GS1 codes with `CONTAINS`, `MAY_CONTAIN`, `FREE_FROM` (groups `allergen`, `nonAllergen`). **59 % of products have no allergen statement at all**, including obvious ones (a salmon fillet with no fish entry).
+- Allergens use GS1 codes with `CONTAINS`, `MAY_CONTAIN`, `FREE_FROM` (groups `allergen`, `nonAllergen`). **46 % of products have no allergen statement at all** (neither `allergen` nor `nonAllergen` entries); 59 % list no `CONTAINS`/`MAY_CONTAIN`, including obvious ones (a salmon fillet with no fish entry).
 - Diet claims live in `nutritionalClaim`: `FREE_FROM_LACTOSE` (4,178), `FREE_FROM_GLUTEN` (3,047), `VEGAN`, `VEGETARIAN`.
 - Labels live in `packagingMarkedLabel`: Finnish origin marks, EU organic, MSC, ASC, Fairtrade and more.
 - Only 250 substitution pairs exist (product → product). There is no product-type taxonomy.
-- Sales units are technical codes (`ST`, `KI`, `PAK`, `KG`, `BOT`…). Pack content comes from `units[].sizeInBaseUnits` and `synkkaData.unitConversions`.
+- Sales units are technical codes (`ST`, `KI`, `PAK`, `KG`, `BOT`…). Pack content comes from `units[].sizeInBaseUnits` and `synkkaData.unitConversions`. Checked against the price API on 1,000 random products: content is derivable for 60 % of products and matches `catalogPrice / comparisonPrice` within 3 % in 96 % of those; the rest look like drained vs net weight.
 - Dataset ids (e.g. `464237`) differ from webshop codes for the same product (`8042224`). Join to the webshop by GTIN, never by id.
 
 ### 2.3 From the mock API (`https://junction26.valioaimo.fi`, header `X-API-Key`)
@@ -100,14 +100,14 @@ Data quality that shapes the rules:
 | Agent | Any AI agent holding a gateway key | — (new) | Search, check offers, build proposals. **Never approve, never export as approved** |
 | Admin | Our team / Valio service desk | — | Kill switch per customer, read all decision records |
 
-An agent key belongs to one customer and carries its own limits (section 8). The first demo customer is a fictional hotel chain, "Hotel Kaisla", with two sites.
+An agent key belongs to one customer and carries its own limits (section 8). Every caller sends `Authorization: Bearer <token>`; a token maps to customer, role and limits (demo tokens are seeded for the demo customer). A customer-level switch turns all its agent keys off (kill switch). The first demo customer is a fictional hotel chain, "Hotel Kaisla", with two sites.
 
 ---
 
 ## 4. Architecture
 
 ```
-Buyer / buyer's agent ──► Gateway (MCP + REST, one codebase, FastAPI)
+Buyer / buyer's agent ──► Gateway (MCP + REST, one codebase, TypeScript)
                               │
        ┌──────────────────────┼─────────────────────────┐
        ▼                      ▼                         ▼
@@ -121,9 +121,10 @@ Buyer / buyer's agent ──► Gateway (MCP + REST, one codebase, FastAPI)
                      Decision record (append-only audit, human-readable)
 ```
 
-- **One implementation.** Python backend with FastAPI; REST and the OpenAPI document come from the same routes; MCP tools are thin wrappers over the same functions. A small web UI (React) for the human side. No second engine in the browser.
+- **One implementation.** TypeScript on Node (≥ 22) end to end. REST with Hono; the OpenAPI document is generated from the same zod schemas the routes validate with (`@hono/zod-openapi`). MCP tools (`@modelcontextprotocol/sdk`) are thin wrappers over the same functions. Storage is the built-in `node:sqlite` with FTS5; tests use `node:test`. A small web UI (React + Vite) for the human side shares the zod types. No second engine in the browser.
 - **LLM**: two jobs only, turning text into a `PurchaseRequest` and wording the explanation from computed facts. Any OpenAI-compatible or Anthropic endpoint, set by environment. A deterministic fallback parser keeps the product working with the model off. The model never sees or decides prices, eligibility, quantities or policy verdicts.
-- **Seam for production**: `OrderSink` has one implementation today (file export). A real order API becomes a second implementation; nothing else changes.
+- **Seam for production**: the order sink is one function today (`toCsv`, file export by GTIN). A real order API becomes a second sink next to it; nothing else changes. (No interface until the second implementation exists.)
+- **Text parsing today**: rules only (`src/parse.ts`: quantities, units, dates, weekdays, diets, allergens in en/fi/sv; asks when quantity or product is missing). The LLM path plugs in when the provider is decided (15.4); the keyword detector stays in front of it either way.
 
 ---
 
@@ -133,12 +134,14 @@ Buyer / buyer's agent ──► Gateway (MCP + REST, one codebase, FastAPI)
 |---|---|---|
 | `search_products` · `GET /products/search` | agent, user | Text (fi/en/sv) + filters: free-from allergens, diets, labels, origin, category. Local data only, no API call |
 | `get_product` · `GET /products/{id}` | agent, user | Static product data incl. allergens, claims, labels, CO2, reliability |
-| `check_offers` · `POST /offers` | agent, user | Price + availability for ≤ 30 ids and a date. Cached. The only route that calls the mock API |
+| `check_offers` · `POST /offers` | agent, user | Price + availability for ≤ 50 ids and a date. Cached. The only route that calls the mock API |
 | `create_proposal` · `POST /proposals` | agent, user | Takes a `PurchaseRequest`, runs the planner, returns a proposal with decision record and policy verdict |
 | `get_proposal` · `GET /proposals/{id}` | agent, user | Proposal, lines, alternatives, exceptions, verdict |
 | `revise_proposal` · `PATCH /proposals/{id}` | agent, user | Change a line (choose another option, change quantity). Re-runs checks |
 | `decide` · `POST /proposals/{id}/decision` | **human only** | Approve or reject. Not exposed as an MCP tool. Agent keys get 403 |
-| `export` · `GET /proposals/{id}/export` | human, or agent when auto-approved | Webshop import file for an approved proposal |
+| `export_proposal` · `GET /proposals/{id}/export` | human (approved), agent (only `auto_approved`) | Webshop import CSV: `gtin;product_id;name;quantity;sales_unit;unit_price_eur;line_total_eur;delivery_date`, `;` separated, decimal comma, UTF-8 BOM. Layout is a placeholder until 15.2 is answered. Marks the proposal `exported`, file hash in the audit |
+| `POST /parse` | agent, user | Free text → `PurchaseRequest` or a clarification question |
+| `GET /proposals` | agent, user | Latest proposals of the caller's customer |
 | `GET /policy`, `PUT /policy` | approver | Customer policy (section 8) |
 | `GET /audit` | all | Decision records |
 
@@ -164,7 +167,7 @@ Every response that the agent acts on carries `policy_verdict` and `requires_hum
 }
 ```
 
-- `unit` is `kg`, `l` or `pcs`. `priorities` picks a weight preset (section 9.3).
+- `unit` is `kg`, `l` or `pcs` (`pcs` = sales units as sold, no content conversion). `priorities` picks a weight preset (section 9.3).
 - Diet and allergen words found by the keyword detector in `source_text` are always added, even if the model left them out. The model can add a limit, never remove one.
 - Missing date → next delivery date whose cut-off has not passed, stated in the proposal. A date in the past → clarification.
 
@@ -175,8 +178,8 @@ Every response that the agent acts on carries `policy_verdict` and `requires_hum
 ### 7.1 Steps per item
 
 1. **Find**: full-text search over fi/en/sv names, then category of the top hits to widen the pool. Max 200 local candidates.
-2. **Hard filters** (local data, each exclusion recorded with its reason): sales block in data, excluded allergen (`CONTAINS` **or** `MAY_CONTAIN`), required diet not satisfied, required label missing, **no allergen statement while any allergen or diet limit applies** ("allergen data missing"), quantity unit cannot be matched (need in litres, product has no litre content).
-3. **Shortlist**: top 30 by text relevance and local criteria.
+2. **Hard filters** (local data, each exclusion recorded with its reason): sales block in data, excluded allergen (`CONTAINS` **or** `MAY_CONTAIN`), required diet not satisfied, required label missing, **no allergen statement while any allergen or diet limit applies** ("allergen data missing"). Unit matching is **not** a local filter: content is often missing in data but known to the price API, so it is checked after offers (7.2).
+3. **Shortlist**: top 50 eligible, the dominant category first. 50, not 30: the milk category alone has 36 eligible lactose-free products, and cutting a category can hide the cheapest option. Still one call per item.
 4. **Offers**: one `check_offers` call for the shortlist and `deliver_by`.
 5. **Score** the deliverable ones (section 9), rank, explain.
 6. **Allocate** the quantity (section 7.2).
@@ -191,9 +194,9 @@ Diet satisfaction:
 
 ### 7.2 Quantity and allocation
 
-- Content per sales unit (litres or kg) comes from `units[]` × base-unit content in `unitConversions`. If missing, estimate `catalogPrice / comparisonPrice` (checked on real data: 1.0, 5.01, 3.75, 19.94 l) and flag the line `content_estimated`.
-- Sales units needed = `ceil(quantity / content)`, rounded up to a multiple of `allowedLotSize` (values below 1 count as 1).
-- Allocation: fill from the best-ranked option. If its known amount is short, take the rest from the next option (**split**), up to 3 products per item. Each part keeps its own reason.
+- Content per sales unit (litres or kg) comes from `units[]` × base-unit content in `unitConversions`. If missing, use `catalogPrice / comparisonPrice` when `comparisonUnit` is the needed unit, and flag the line `content_from_price`. If the data value differs from the API value by more than 3 %, use the API value and flag `content_mismatch` (the price per kg/l is computed by Valio on that basis). Still unknown → option dropped with reason "unit cannot be matched".
+- Sales units needed = `ceil(quantity / content)`, rounded up to a multiple of `allowedLotSize` (values below 1 count as 1; 1.5, 2, 3… occur in data). The schedule line's `salesUnit` equals the product's sales unit (checked on the milk shortlist).
+- Allocation: fill from the best-ranked on-time option; late options (E3) only after all on-time ones. If its known amount is short, take the rest from the next option (**split**), up to 3 products per item. Each part keeps its own reason.
 - Lines whose `availableDate` is later than `deliver_by` go into a separate delivery date (= separate webshop cart). Never silently.
 
 ### 7.3 Exceptions
@@ -232,11 +235,11 @@ Before approval the gateway re-runs `check_offers` for the chosen lines. If pric
 | `agent_may_finalise` | **false** | Master switch. Off = every proposal needs a human (today's expectation) |
 | `max_order_eur` | 500 | Above this, a human signs off even if the switch is on |
 | `max_line_eur` | 200 | Same, per line |
-| `allow_substitutes` | false | Auto-finalise proposals that contain a substitute |
+| `allow_substitutes` | false | Auto-finalise proposals that contain a substitute. *Not implemented yet: lines are matched to a need, not substituted for a named product; comes with named-product requests* |
 | `allow_unknown_amount` | false | Auto-finalise lines with E5 |
 | `allow_split` | true | Auto-finalise split lines |
 | `max_over_best_price_pct` | 10 | Chosen option may cost at most this much more per kg/l than the cheapest eligible one |
-| `weights` | preset | Scoring weights (9.3) |
+| `weights` | preset | Scoring weights (9.3). *For now the request's `priorities` picks the preset* |
 
 Per-agent key limits are a subset: an agent key can be stricter than the customer policy, never looser.
 
@@ -261,13 +264,13 @@ Only eligible, deliverable options are scored. All criteria are 0..1, higher is 
 
 | Criterion | Score | Default weight |
 |---|---|---|
-| Price | lowest `comparisonPrice` ÷ this one | 0.40 |
-| Availability | 1 = on time and known amount covers the need; 0.7 = on time, amount unknown; 0.4 = on time, partial | 0.25 |
+| Price | lowest price per l/kg ÷ this one (price per sales unit ÷ content from 7.2, so it matches what is paid) | 0.40 |
+| Availability | 1 = on time and known amount covers the need; 0.7 = on time, amount unknown; 0.4 = on time, partial; 0 = late (E3) | 0.25 |
 | Reliability | value from the file; missing → vendor mean; else 0.9 | 0.15 |
 | CO2 | lowest kg CO2e/kg ÷ this one; missing → criterion skipped, weights rescaled | 0.10 |
 | Origin and labels | 1 if `fi` or a Finnish origin mark; +0.5 per required/preferred label, capped at 1 | 0.10 |
 
-Ties: lower total cost, then product id. Weight presets: `price_and_availability` (above), `sustainability` (CO2 0.30, price 0.30), `reliability_first` (reliability 0.35).
+Ties: lower total cost, then product id. Weight presets (price / availability / reliability / CO2 / origin): `price_and_availability` 0.40/0.25/0.15/0.10/0.10, `sustainability` 0.30/0.20/0.10/0.30/0.10, `reliability_first` 0.30/0.20/0.35/0.05/0.10.
 
 ---
 
@@ -277,7 +280,7 @@ Ties: lower total cost, then product id. Weight presets: `price_and_availability
 - `substitutions` (product, substitute).
 - `offer_cache`: endpoint, product, date, response JSON, fetched_at.
 - `customers`, `sites`, `users` (role), `agent_keys` (customer, limits, revoked).
-- `policies` (section 8.2), `proposals`, `proposal_lines` (option chosen, alternatives JSON, exceptions, frozen price + validity), `decisions`, `audit` (append-only).
+- `customers.policy` (section 8.2, JSON), `tokens`, `proposals` (request, planned items with options, offers, allocation and verdict as JSON), `audit` (append-only, enforced by triggers; decisions are audit events).
 
 Money in integer cents ex-VAT; VAT rate stored per line from the API.
 
@@ -287,7 +290,7 @@ Money in integer cents ex-VAT; VAT rate stored per line from the API.
 
 ### 11.1 Fixed facts (checked against the API on 2026-11-14, date 2026-11-16)
 
-30 lactose-free milk products pass the filters. Examples:
+36 lactose-free products in the milk category (10400) pass the filters. Examples:
 
 | Product (dataset id) | Model | Amount | €/l |
 |---|---|---|---|
@@ -301,15 +304,17 @@ Stock products have cut-off 15 Nov 17:00; Terminal products report 12 Nov (E6).
 
 ### 11.2 Scenes (3 minutes)
 
-1. **Request (outside agent)**: in Claude Desktop, connected to our gateway over MCP, say the brief's sentence. The agent calls `search_products`, `check_offers`, `create_proposal`. Point: an outside agent works through an open standard.
+1. **Request (outside agent)**: in Claude Desktop, connected to our gateway over MCP, say the brief's sentence. The agent calls `search_products`, `check_offers`, `create_proposal`. Point: an outside agent works through an open standard. Even if the agent forgets the diet, the keyword detector adds "lactose-free" from its `source_text` (checked in the dry run).
 2. **Proposal**: open the approval UI. 1,000 l of the cheapest option, flagged "amount not confirmed" (E5); the 0.5 l product is listed as not available (E2); Terminal products dropped for a passed cut-off (E6). Each line has its reason.
 3. **Guardrail**: the agent tries to finalise; the gateway answers `requires_human` (policy: unknown amount, over €500). The agent tells its user so.
-4. **Human**: the approver switches to "confirmed stock only": the planner splits 384 + 51 l and states the shortfall, or keeps the unknown-amount option. Approve. Export the file.
+4. **Human**: the approver switches to "confirmed stock only" (`PATCH` with `confirmed_only`): the planner splits 384 + 51 + 565 l across three Arla products, €2,580.64 instead of €1,010, and the policy flags "more than 10 % over the best price per unit". The approver goes back to the unknown-amount option or accepts the split. Approve (prices re-checked first). Export the file.
 5. **Path to production**: show the file and the decision record; one line on importing it into today's webshop cart ("Tuo tiedostosta") and where the order API would plug in. Trust ladder banner as the closing line.
 
 ### 11.3 Demo safety
 
-- Record all API responses used by the scenes into `offer_cache` the day before; the demo reads the cache if the API is slow, and says so on screen.
+- Record all API responses used by the scenes into `offer_cache` the day before (`npm run record`); the demo reads the cache if the API is slow or down, and says so on screen ("API trouble, cached offers used", which also makes the proposal need a human). `VALIO_TIMEOUT_MS` shortens the wait on a slow network.
+- `npm run demo:reset` empties proposals and the decision record and adds five small milk orders approved unchanged, so the trust-ladder banner is on screen for the closing line. Demo fixture only.
+- `npm run demo` serves the UI and the API from one process.
 - Fixed demo clock (`DEMO_NOW`), so cut-offs behave the same at judging time.
 - Never touch the shared webshop account during the demo.
 
@@ -318,7 +323,7 @@ Stock products have cut-off 15 Nov 17:00; Terminal products report 12 Nov (E6).
 ## 12. Non-functional
 
 - Secrets (`VALIO_API_KEY`, LLM key) only from environment; `.env.example` in the repo.
-- API politeness: shortlist only, ≤ 30 ids per call, client throttle 5 calls/s, 429 → 30 s wait.
+- API politeness: shortlist only, ≤ 50 ids per call, client throttle 5 calls/s, 429 → 30 s wait.
 - Every query filtered by the caller's customer. Agent keys revocable; admin kill switch.
 - Product search < 100 ms; proposal for one item < 3 s with a warm cache.
 - The dataset licence allows use for Junction 2026 only. Do not publish it.
@@ -329,7 +334,7 @@ Stock products have cut-off 15 Nov 17:00; Terminal products report 12 Nov (E6).
 
 1. Diet/allergen property test over the whole catalogue: no proposal line ever violates the limits.
 2. Golden test: the milk request on cached responses gives the expected shortlist, exceptions E2, E5, E6, and a stable ranking.
-3. Quantity: lot size 0.01 → 1; content estimate flagged; split never exceeds known amounts.
+3. Quantity: lot size 0.01 → 1; content from price and content mismatch flagged; split never exceeds known amounts.
 4. Policy: each rule at and over its limit; agent key cannot call `decide` (403) and gets no MCP tool for it; alcohol always human.
 5. Re-validation: changed cached price → `needs_review` with the difference.
 6. 429 handling with a fake server.
@@ -344,7 +349,7 @@ Manual: all scenes twice, once with the model off.
 | Role | Owns |
 |---|---|
 | A · Planner | Data loader, filters, diet rules, scoring, allocation, exceptions, golden test |
-| B · Gateway | FastAPI routes, MCP server, offer client + cache + 429, policy engine, audit, export |
+| B · Gateway | Hono routes, MCP server, offer client + cache + 429, policy engine, audit, export |
 | C · UI | Approval UI: proposal view, alternatives, decision, policy editor, decision timeline, trust banner |
 | D · Agent + pitch | LLM parse/explain + fallback, Claude Desktop MCP setup, demo script, rehearsal |
 
