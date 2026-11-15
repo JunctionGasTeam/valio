@@ -12,6 +12,7 @@ import { planItem, PRESETS, type Overrides, type Priorities } from './planner.ts
 import { evaluate, effectivePolicy, historyKey, PolicySchema, type Policy, type Verdict } from './policy.ts';
 import { detectLimits, parseText, readBack } from './parse.ts';
 import { loadRecipes, scaleRecipe } from './recipes.ts';
+import { assess, LOW_DAYS, stockOf, SYSTEM } from './stock.ts';
 
 // One person (the owner) may do everything; the agent is the AI working through MCP and can never approve (hard rule 2).
 type Role = 'owner' | 'agent';
@@ -41,10 +42,12 @@ type RecipeRef = {
   id: string; name: string; url: string; yield: number; portions: number; pantry?: string[];
   from: string[]; skipped: { text: string; reason: string }[];
 };
+// `stock` is set only by POST /stock/check: the reading the agent ordered from (the read-back for stock refills).
+type StockRef = { system: string; read_at: string; name: string; on_hand: number; daily_use: number; par: number; days_left: number; incoming: number };
 // `confirmed`: a person said "this is what I meant" (POST /proposals/{id}/confirm). Cleared when the request is corrected.
 // `from_agent`: created by an agent key, so the original text is required for the quantity check (policy.ts).
 type Request = z.infer<typeof PurchaseRequest> & {
-  deliver_by: string; deliver_by_defaulted?: boolean; recipe?: RecipeRef; confirmed?: { by: string; at: string }; from_agent?: boolean;
+  deliver_by: string; deliver_by_defaulted?: boolean; recipe?: RecipeRef; stock?: StockRef; confirmed?: { by: string; at: string }; from_agent?: boolean;
 };
 const TRUST_THRESHOLD = 3; // unchanged approvals in a row: suggest autonomy (§8.4) and skip the request confirmation
 
@@ -178,7 +181,9 @@ export function createApp(db: DatabaseSync) {
     return h;
   };
   const verdictFor = (r: Request, items: any[], a: Actor) =>
-    evaluate(db, items, { exclude_allergens: r.exclude_allergens, diets: r.diets, labels_required: r.labels_required, budget_eur: r.budget_eur, source_text: r.source_text, from_agent: r.from_agent && !r.recipe },
+    // Recipes and stock refills: the gateway computed the quantities, not a model reading words, so there is no text to
+    // check them against. usual_quantity still catches a bad stock reading (a typo in the par level).
+    evaluate(db, items, { exclude_allergens: r.exclude_allergens, diets: r.diets, labels_required: r.labels_required, budget_eur: r.budget_eur, source_text: r.source_text, from_agent: r.from_agent && !r.recipe && !r.stock },
       effectivePolicy(policyOf(a.customer), a.role === 'agent' ? a.limits : null), historyOf(a.customer));
 
   // --- catalogue and offers ----------------------------------------------------------------------------------------
@@ -213,7 +218,7 @@ export function createApp(db: DatabaseSync) {
   // --- proposals ---------------------------------------------------------------------------------------------------
   // Every way in (free text, form, agent, recipe) ends here: same limits, planning, policy and decision record.
   // Request + planned items + verdict: shared by creating a proposal and correcting one.
-  const planRequest = async (a: Actor, input: z.infer<typeof PurchaseRequest>, recipe?: RecipeRef, fromAgent = a.role === 'agent') => {
+  const planRequest = async (a: Actor, input: z.infer<typeof PurchaseRequest> & { stock?: StockRef }, recipe?: RecipeRef, fromAgent = a.role === 'agent') => {
     const today = helsinkiToday();
     if (input.deliver_by && input.deliver_by < today)
       return { error: 'clarification needed', question: `The delivery date ${input.deliver_by} is in the past. Which date do you need?` };
@@ -242,14 +247,15 @@ export function createApp(db: DatabaseSync) {
     }
     return { r, items, verdict: verdictFor(r, items, a) };
   };
-  const createProposal = async (a: Actor, input: z.infer<typeof PurchaseRequest>, recipe?: RecipeRef) => {
+  const createProposal = async (a: Actor, input: z.infer<typeof PurchaseRequest> & { stock?: StockRef }, recipe?: RecipeRef) => {
     const planned = await planRequest(a, input, recipe);
     if ('question' in planned) return planned;
     let { r, items, verdict } = planned;
-    // An agent finishing alone never takes the risk of unconfirmed stock: it switches to the sure-delivery option and
-    // keeps it only if that passes every check. Otherwise the person sees the best option with the sure one next to it.
+    // Finishing alone, the agent does not take unconfirmed stock unless the policy accepts it: it switches to the
+    // sure-delivery option and keeps it only if that passes every check. Otherwise the person sees the best option with
+    // the sure one next to it. Same for a request typed in the app: the planner is the agent there too.
     const pol = effectivePolicy(policyOf(a.customer), a.role === 'agent' ? a.limits : null);
-    if (a.role === 'agent' && pol.agent_may_finalise && verdict.requires_human && items.some((it) => it.sure_option)) {
+    if (pol.agent_may_finalise && verdict.requires_human && items.some((it) => it.sure_option)) {
       const sure = await Promise.all(items.map((it, i) => (it.sure_option ? plan(r, i, { confirmed_only: true }) : it)));
       const v = verdictFor(r, sure, a);
       if (!v.requires_human) { items = sure; verdict = v; }
@@ -298,12 +304,49 @@ export function createApp(db: DatabaseSync) {
     return 'question' in out ? c.json(out, 400) : c.json(out, 200);
   });
 
+  // --- the kitchen's stock system (mock, src/stock.ts) ---------------------------------------------------------------
+  // Amounts already on the way: open orders the agent made from the stock system, so a second check does not repeat them.
+  const stockNow = (customer: string) => {
+    const s = stockOf(customer);
+    if (!s) return null;
+    const open = (db.prepare(`SELECT id, request FROM proposals WHERE customer = ? AND status NOT IN ('rejected', 'expired')`).all(customer) as any[])
+      .map((r) => ({ id: r.id as string, req: JSON.parse(r.request) as Request })).filter((r) => r.req.stock);
+    const today = helsinkiToday();
+    return { system: SYSTEM, site: s.site, read_at: now().toISOString(), low_days: LOW_DAYS, items: s.items.map((it) => {
+      const mine = open.filter((o) => o.req.items.some((x) => x.need === it.need && x.unit === it.unit));
+      const incoming = mine.reduce((n, o) => n + o.req.items.filter((x) => x.need === it.need && x.unit === it.unit).reduce((m, x) => m + x.quantity, 0), 0);
+      return { ...assess(it, incoming, today), orders: mine.map((o) => o.id) };
+    }) };
+  };
+  app.openapi(route('get', '/stock', 'The kitchen\'s stock levels and what runs low (read from its stock system)'), (c) => {
+    const s = stockNow(c.get('actor').customer);
+    return s ? c.json(s, 200) : c.json({ error: 'no stock system connected' }, 404);
+  });
+  app.openapi(route('post', '/stock/check', 'The agent reads the stock system and proposes a refill for everything running low'), async (c) => {
+    const a = c.get('actor');
+    const s = stockNow(a.customer);
+    if (!s) return c.json({ error: 'no stock system connected' }, 404);
+    // A person may ask, but the agent does the work under its own key and limits: the proposals are the agent's.
+    const t = db.prepare(`SELECT t.name, t.limits, c.agents_enabled FROM tokens t JOIN customers c ON c.id = t.customer
+      WHERE t.customer = ? AND t.role = 'agent' AND NOT t.revoked`).get(a.customer) as any;
+    if (!t) return c.json({ error: 'this customer has no agent key' }, 409);
+    if (!t.agents_enabled) return c.json({ error: 'agents are switched off for this customer' }, 403);
+    const agent: Actor = { customer: a.customer, name: t.name, role: 'agent', limits: t.limits ? JSON.parse(t.limits) : null };
+    // One proposal per product: routine refills can finish on their own while new ones wait for a person.
+    const created = await Promise.all(s.items.filter((it) => it.low && it.order > 0).map((it) => createProposal(agent, {
+      site: s.site, deliver_by: it.deliver_by, items: [{ need: it.need, quantity: it.order, unit: it.unit }],
+      diets: it.diets, exclude_allergens: [], labels_required: [], priorities: 'price_and_availability', budget_eur: null,
+      stock: { system: s.system, read_at: s.read_at, name: it.name, on_hand: it.on_hand, daily_use: it.daily_use, par: it.par, days_left: it.days_left, incoming: it.incoming },
+    })));
+    return c.json({ checked: s.items.length, created }, 200);
+  });
+
   app.openapi(route('get', '/proposals', 'Latest proposals of the caller\'s customer'), (c) => {
     const rows = db.prepare('SELECT * FROM proposals WHERE customer = ? ORDER BY created_at DESC LIMIT 100').all(c.get('actor').customer) as any[];
     return c.json(rows.map((r) => {
       const v = JSON.parse(r.verdict), req = JSON.parse(r.request);
       return { id: r.id, status: r.status, site: req.site, deliver_by: req.deliver_by, total_cents: v.total_cents,
-        requires_human: v.requires_human, open_checks: v.rules.filter((x: any) => !x.ok).map((x: any) => x.rule), recipe: req.recipe ? `${req.recipe.name} × ${req.recipe.portions} portions` : null, needs: req.items.map((i: any) => `${i.quantity} ${i.unit} ${i.need}`), created_by: r.created_by, created_at: r.created_at };
+        requires_human: v.requires_human, open_checks: v.rules.filter((x: any) => !x.ok).map((x: any) => x.rule), recipe: req.recipe ? `${req.recipe.name} × ${req.recipe.portions} portions` : null, from_stock: !!req.stock, needs: req.items.map((i: any) => `${i.quantity} ${i.unit} ${i.need}`), created_by: r.created_by, created_at: r.created_at };
     }), 200);
   });
 
@@ -363,7 +406,7 @@ export function createApp(db: DatabaseSync) {
       recipe = { ...recipe, portions: fix.portions, from: scaled.items.map((i) => i.from), skipped: scaled.skipped };
     }
     const planned = await planRequest(a, {
-      site: old.site, source_text: old.source_text, labels_required: old.labels_required, budget_eur: old.budget_eur, items,
+      site: old.site, source_text: old.source_text, labels_required: old.labels_required, budget_eur: old.budget_eur, items, stock: old.stock,
       deliver_by: fix.deliver_by ?? (old.deliver_by_defaulted ? undefined : old.deliver_by),
       diets: fix.diets ?? old.diets, exclude_allergens: fix.exclude_allergens ?? old.exclude_allergens, priorities: fix.priorities ?? old.priorities,
     }, recipe, !!old.from_agent);

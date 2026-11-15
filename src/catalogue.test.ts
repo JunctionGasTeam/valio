@@ -50,3 +50,9 @@ test('milk allergy also excludes products that list only lactose', () => {
   assert.deepEqual(goat.contains, ['ML']);
   assert.deepEqual(ineligibility(goat, { exclude_allergens: ['AM'] }), ['contains allergen AM']);
 });
+
+test('a short word inside other words does not pick the category: voi is butter, not voileipä biscuits', () => {
+  const r = search(db, 'voi');
+  assert.equal(r.category, '10500');
+  assert.ok(r.matches.slice(0, 10).some((p) => p.id === '463798')); // Valio voi 200 g
+});

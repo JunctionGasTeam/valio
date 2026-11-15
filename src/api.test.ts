@@ -132,6 +132,9 @@ test('policy: agent may finish routine orders within limits; an agent key can on
   assert.equal(auto.requires_human, false);
   assert.deepEqual(auto.items[0].allocation.map((l: any) => l.id), ['469363', '462775', '463380']);
   assert.equal((await app.request(`/proposals/${auto.id}/export`, { headers: { authorization: 'Bearer demo-agent' } })).status, 200);
+  // The same request typed in the app (owner token) is finished the same way: sure option, no sign-off needed.
+  const typed = (await call('demo-owner', 'POST', '/proposals', MILK)).body;
+  assert.deepEqual([typed.status, typed.items[0].allocation.map((l: any) => l.id)], ['auto_approved', ['469363', '462775', '463380']]);
 
   db.prepare("UPDATE tokens SET limits = ? WHERE token = 'demo-agent'").run(JSON.stringify({ max_order_eur: 100, agent_may_finalise: true }));
   const tight = (await call('demo-agent', 'POST', '/proposals', MILK)).body;
@@ -305,6 +308,30 @@ test('trust ladder: 3 unchanged approvals suggest autonomy, learned from what wa
   await call('demo-owner', 'PUT', '/policy', {});
 });
 
+test('stock: the agent refills what runs low from the kitchen\'s stock system, once, under its own key', async () => {
+  const st = (await call('demo-owner', 'GET', '/stock')).body;
+  const low = st.items.filter((i: any) => i.low).map((i: any) => [i.need, i.order, i.unit, i.deliver_by]);
+  assert.deepEqual(low, [['maito', 200, 'l', '2026-11-16'], ['voi', 10, 'kg', '2026-11-16']]); // 2 days left each, refill to par
+
+  await call('demo-owner', 'PUT', '/agents', { enabled: false });
+  assert.equal((await call('demo-owner', 'POST', '/stock/check')).status, 403); // kill switch stops this too
+  await call('demo-owner', 'PUT', '/agents', { enabled: true });
+
+  const { created } = (await call('demo-owner', 'POST', '/stock/check')).body;
+  assert.equal(created.length, 2);
+  const milk = created.find((p: any) => p.request.items[0].need === 'maito');
+  assert.equal(milk.created_by, 'agent:Buyer agent'); // a person asked, the agent made it
+  assert.deepEqual([milk.request.stock.on_hand, milk.request.stock.par, milk.request.diets], [80, 280, ['lactose_free']]);
+  assert.ok(!failed(milk).includes('matches_request_text')); // gateway-computed quantity, no words to check
+  assert.equal((await call('demo-owner', 'POST', '/stock/check')).body.created.length, 0); // already on the way
+  await call('demo-owner', 'POST', `/proposals/${milk.id}/decision`, { decision: 'reject' });
+  const again = (await call('demo-agent', 'POST', '/stock/check')).body.created;
+  assert.deepEqual(again.map((p: any) => p.request.items[0].need), ['maito']); // rejected → low again
+  // A person's fix keeps where the order came from.
+  const fixed = (await call('demo-owner', 'PATCH', `/proposals/${again[0].id}/request`, { items: [{ need: 'maito', quantity: 150, unit: 'l' }] })).body;
+  assert.equal(fixed.request.stock.name, 'Lactose-free milk');
+});
+
 test('MCP: an outside agent gets the same guardrails and no approve tool', async () => {
   const { serve } = await import('@hono/node-server');
   const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
@@ -317,7 +344,7 @@ test('MCP: an outside agent gets the same guardrails and no approve tool', async
   }));
   try {
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
-    assert.deepEqual(names, ['check_offers', 'create_proposal', 'export_proposal', 'get_product', 'get_proposal', 'revise_proposal', 'search_products']);
+    assert.deepEqual(names, ['check_offers', 'check_stock', 'create_proposal', 'export_proposal', 'get_product', 'get_proposal', 'revise_proposal', 'search_products']);
     const text = (r: any) => JSON.parse(r.content[0].text);
     const found = text(await client.callTool({ name: 'search_products', arguments: { q: 'maito', diets: ['lactose_free'] } }));
     assert.ok(found.matches.some((p: any) => p.id === '464306'));

@@ -3,6 +3,7 @@
 import { openDb } from './db.ts';
 import { planItem } from './planner.ts';
 import { loadRecipes, scaleRecipe } from './recipes.ts';
+import { stockOf } from './stock.ts';
 
 const DATE = process.env.DEMO_DATE ?? '2026-11-16';
 const db = openDb();
@@ -11,6 +12,12 @@ for (const need of ['maito', 'milk', 'lactose free milk']) {
   const r = await planItem(db, { need, quantity: 1000, unit: 'l' }, { diets: ['lactose_free'] }, DATE);
   console.log(`${need}: ${r.options.length} deliverable, ${r.dropped.length} dropped, best ${r.allocation[0]?.id ?? '-'}, exceptions ${r.exceptions.join(',')}`);
   if (r.errors.length) { console.error('  NOT RECORDED:', r.errors.join('; ')); process.exitCode = 1; }
+}
+// Stock scene: every product of the demo stock system at its refill size (milk is recorded above).
+for (const it of stockOf('kaisla')!.items.filter((x) => x.need !== 'maito')) {
+  const r = await planItem(db, { need: it.need, quantity: it.par - it.on_hand, unit: it.unit }, { diets: it.diets }, DATE);
+  console.log(`stock ${it.need}: ${r.options.length} deliverable, best ${r.allocation[0]?.id ?? '-'}${r.errors.length ? ', NOT RECORDED' : ''}`);
+  if (r.errors.length) process.exitCode = 1;
 }
 // Recipe scene: every recipe at 100 portions for the recipe page's default date (Wednesday).
 const RECIPE_DATE = process.env.DEMO_RECIPE_DATE ?? '2026-11-18';

@@ -63,6 +63,12 @@ server.registerTool('create_proposal', {
   inputSchema: PurchaseRequest,
 }, (a) => gateway('POST', '/proposals', a));
 
+server.registerTool('check_stock', {
+  description: 'Read the kitchen\'s stock system and create a refill proposal for every product that runs out within 3 days '
+    + '(refilled to the kitchen\'s par level, one proposal per product; products already on the way are skipped). ' + AFTER,
+  inputSchema: {},
+}, () => gateway('POST', '/stock/check', {}));
+
 server.registerTool('get_proposal', {
   description: 'A proposal with its lines, alternatives, exceptions, status and policy verdict. ' + AFTER,
   inputSchema: { id: z.string() }, annotations: readOnly,

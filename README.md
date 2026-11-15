@@ -30,11 +30,13 @@ Optional: `GEMINI_API_KEY` in `.env` turns on the model (parsing free text, chec
 
 Demo tokens (`Authorization: Bearer …`): `demo-owner` (the one person using the app: may do everything) and `demo-agent` (the AI agent over MCP: never approves, never changes the policy). Set `DEMO_NOW` to fix the clock.
 
+Kitchen stock (Stock page, `GET /stock`, MCP `check_stock`) reads a mock of the kitchen's own stock system (`src/stock.ts`); the agent proposes a refill for whatever runs out within 3 days.
+
 ## Demo
 
 ```sh
 npm run record      # online, the day before: records the offers the scenes use (fallback if the API is down)
-npm run demo:reset  # empty proposals + decision record, 5 approved orders of history (trust-ladder banner)
+npm run demo:reset  # empty proposals + decision record, 2 approved orders of history (the 3rd, live, brings the trust banner)
 npm run demo        # builds the UI, one process on :8787 (UI at /), clock fixed at 2026-11-14 12:00
 ```
 

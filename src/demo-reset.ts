@@ -1,6 +1,6 @@
 // Demo fixture (context.md §11.3): wipes proposals and the decision record, keeps the catalogue and the recorded offer
-// cache, then adds five small milk orders approved unchanged "in earlier weeks", so the trust-ladder suggestion (§8.4)
-// is there for the closing line. Demo data only: a real deployment never drops the audit table.
+// cache, then adds two small milk orders approved unchanged "in earlier weeks", so the third approval, made live,
+// brings up the trust-ladder suggestion (§8.4). Demo data only: a real deployment never drops the audit table.
 import { openDb } from './db.ts';
 import { createApp, seed } from './api.ts';
 
@@ -18,7 +18,8 @@ const call = async (token: string, path: string, body: unknown) => {
   if (!res.ok) throw new Error(`${path}: ${res.status} ${j.error}`);
   return j;
 };
-for (const litres of [150, 200, 180, 220, 200]) {
+// Two, not three: the third approval happens live, so the trust banner appears from a click the audience just saw.
+for (const litres of [180, 200]) {
   const p = await call('demo-agent', '/proposals', {
     site: 'Hotel Kaisla Helsinki', deliver_by: '2026-11-16', items: [{ need: 'maito', quantity: litres, unit: 'l' }], diets: ['lactose_free'],
     source_text: `${litres} l lactose-free milk by Monday`,

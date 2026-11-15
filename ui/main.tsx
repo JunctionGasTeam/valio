@@ -132,7 +132,7 @@ const PATHS: Record<string, string> = {
   book: 'M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5Z',
   external: 'M14 4h6v6m0-6L10 14M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5', loader: 'M12 3a9 9 0 1 0 9 9',
   text: 'M4 6h16M4 12h16M4 18h10', edit: 'M4 20h4L19 9l-4-4L4 16v4Zm9-13 4 4', info: 'M12 16v-5m0-3h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z',
-  refresh: 'M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7',
+  refresh: 'M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7', box: 'M21 8 12 3 3 8v8l9 5 9-5V8ZM3 8l9 5 9-5M12 13v8',
   mic: 'M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Zm7 9a7 7 0 0 1-14 0m7 7v3', stop: 'M7 7h10v10H7z',
   milk: 'M9 2h6M9 2v3L7 8v12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V8l-2-3V2M7 12h10',
   cheese: 'M3 18V11.5L15 5l6 6.5V18Zm0-6.5h18M8 15h.01M13 14.5h.01M17 15.5h.01',
@@ -228,7 +228,7 @@ function App() {
   const waiting = rows?.filter((r) => r.status === 'needs_review').length ?? 0;
   const id = hash.match(/^#\/p\/(.+)$/)?.[1];
   const recipe = hash.match(/^#\/recipes\/(.+)$/)?.[1];
-  const page = id ? 'proposal' : recipe ? 'recipe' : hash.startsWith('#/recipes') ? 'recipes' : hash.startsWith('#/new') ? 'new' : hash.startsWith('#/policy') ? 'policy' : 'home';
+  const page = id ? 'proposal' : recipe ? 'recipe' : hash.startsWith('#/recipes') ? 'recipes' : hash.startsWith('#/new') ? 'new' : hash.startsWith('#/stock') ? 'stock' : hash.startsWith('#/policy') ? 'policy' : 'home';
   const here = (p: string[]) => (p.includes(page) ? 'page' : undefined);
   return (
     <>
@@ -248,6 +248,7 @@ function App() {
           <nav className="nav" aria-label="Main">
             <a href="#" aria-current={here(['home', 'proposal'])}>Orders{waiting > 0 && <span className="count" aria-label={`${waiting} waiting for a decision`}>{waiting}</span>}</a>
             <a href="#/recipes" aria-current={here(['recipes', 'recipe'])}>Recipes</a>
+            <a href="#/stock" aria-current={here(['stock'])}>Stock</a>
             <a href="#/policy" aria-current={here(['policy'])}>Policy</a>
           </nav>
           <a className="btn lime" href="#/new"><Icon name="plus" />New order</a>
@@ -258,6 +259,7 @@ function App() {
           : page === 'new' ? <NewOrder token={token} />
           : page === 'recipes' ? <Recipes token={token} />
           : page === 'recipe' ? <RecipePage key={recipe} id={recipe!} token={token} />
+          : page === 'stock' ? <Stock token={token} />
           : page === 'policy' ? <Policy key={hash + token} token={token} suggest={hash.endsWith('?suggest')} />
           : <Home rows={rows} token={token} />}
       </main>
@@ -334,7 +336,7 @@ function OrderRow({ r }: { r: any }) {
       <a className="order" href={`#/p/${r.id}`}>
         <div className="order-main">
           <strong>{r.recipe ?? r.needs.map((n: string) => n.replace(/^[\d.]+/, (x) => num(+x))).join(', ')}</strong>
-          <span className="muted small">{r.recipe ? `${r.needs.length} ingredients, ` : ''}by {day(r.deliver_by)}, from {who(r.created_by)}, {ago(r.created_at)}</span>
+          <span className="muted small">{r.recipe ? `${r.needs.length} ingredients, ` : ''}by {day(r.deliver_by)}, {r.from_stock ? 'stock refill by' : 'from'} {who(r.created_by)}, {ago(r.created_at)}</span>
           {r.status === 'needs_review' && !!checks.length && (
             <span className="reasons">{checks.slice(0, 4).map((c) => <span key={c}>{RULES[c]?.label ?? c}</span>)}{checks.length > 4 && <span>+{checks.length - 4}</span>}</span>
           )}
@@ -345,6 +347,54 @@ function OrderRow({ r }: { r: any }) {
         </div>
       </a>
     </li>
+  );
+}
+
+// The kitchen's own stock system (a mock in the demo): what runs low, and one button for the agent to refill it.
+const lasts = (d: number) => (d < 1 ? 'less than a day' : `${num(Math.floor(d))} day${Math.floor(d) === 1 ? '' : 's'}`);
+function Stock({ token }: { token: string }) {
+  const [tick, setTick] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const s = usePoll<any>(() => api(token, 'GET', '/stock'), 5000, [token, tick]);
+  if (!s) return <div className="wrap page"><Loading /></div>;
+  const low = s.items.filter((i: any) => i.low);
+  const check = async () => {
+    setBusy(true);
+    try {
+      const { created } = await api(token, 'POST', '/stock/check');
+      toast(created.length ? `The agent proposed ${plural(created.length, 'refill')}. Find them under Orders.` : 'Nothing runs low. No order needed.');
+    } catch (e) { toast((e as Error).message, 'bad'); }
+    setTick((t) => t + 1); setBusy(false);
+  };
+  return (
+    <div className="wrap page">
+    <h1>Kitchen stock</h1>
+    <p className="lead">The agent reads your stock levels. Anything that runs out within {s.low_days} days gets a refill proposal, up to your usual level. A refill is an ordinary order: same checks, same approval.</p>
+    <section className="panel stock" aria-label="Stock levels">
+      <div className="panel-head">
+        <h2>Stock levels</h2>
+        <span className="muted small">{s.system}, read {clock(s.read_at)}</span>
+      </div>
+      <ul className="stock-list">{s.items.map((i: any) => {
+        const d = i.on_hand / i.daily_use, u = unitLabel(i.unit);
+        return (
+          <li key={i.need}>
+            <div className="stock-name"><strong>{i.name}</strong><span className="muted small">{num(i.on_hand)} {u} left, about {num(i.daily_use)} {u} a day</span></div>
+            <div className="stock-bar" aria-hidden="true"><span className={d < s.low_days ? 'low' : ''} style={{ width: `${Math.min(100, d * 10)}%` }} /></div>
+            <span className="small num stock-lasts">lasts {lasts(d)}</span>
+            {i.orders.length ? <a className="badge tone-info" href={`#/p/${i.orders[0]}`}>Refill on the way</a>
+              : i.low ? <Badge tone="warn">Running low</Badge> : <Badge tone="ok">Enough</Badge>}
+          </li>
+        );
+      })}</ul>
+      <div className="stock-foot">
+        <button className="btn" disabled={busy || !low.length} aria-busy={busy} onClick={check}>
+          {busy ? <><Icon name="loader" className="spin" />The agent is planning…</>
+            : low.length ? <><Icon name="spark" />Let the agent refill {plural(low.length, 'item')}</> : <><Icon name="check" />Nothing to refill</>}
+        </button>
+      </div>
+    </section>
+    </div>
   );
 }
 
@@ -374,9 +424,9 @@ const earlySteps = (at: number, notes: Partial<Record<number, string>> = {}): St
 function proposalSteps(p: any, open: number): Step[] {
   const s = p.status, r = p.request, c = p.confirmation;
   return [
-    { state: 'done', note: r.recipe ? 'a recipe' : r.source_text ? 'in your words' : 'by form or agent' },
+    { state: 'done', note: r.recipe ? 'a recipe' : r.stock ? 'stock running low' : r.source_text ? 'in your words' : 'by form or agent' },
     { state: 'done', note: plural(p.items.reduce((n: number, it: any) => n + it.allocation.length, 0), 'line') },
-    { state: c.required ? 'now' : 'done', note: c.required ? 'is this what you meant?' : c.done ? 'you confirmed' : c.skipped_by_trust ? 'skipped: trusted' : 'not needed' },
+    { state: c.required ? 'now' : 'done', note: c.required ? (r.stock ? 'do you need this?' : 'is this what you meant?') : c.done ? 'you confirmed' : c.skipped_by_trust ? 'skipped: trusted' : 'not needed' },
     { state: s === 'needs_review' ? (c.required ? 'next' : 'now') : 'done', note: s !== 'needs_review' || !open ? 'all clear' : `${open} thing${open === 1 ? '' : 's'} to look at` },
     { state: ['rejected', 'expired'].includes(s) ? 'stop' : s === 'needs_review' ? 'next' : 'done',
       note: s === 'rejected' ? 'rejected' : s === 'expired' ? 'expired' : s === 'auto_approved' ? 'by the agent, within policy' : s === 'needs_review' ? NOTES[4] : 'approved' },
@@ -450,7 +500,7 @@ function Proposal({ id, token }: { id: string; token: string }) {
       <Band back={['#', 'All orders']} title={title} steps={proposalSteps(p, issuesOf(p, failed, new Map()).length)} meta={<>
         <span><Icon name="truck" size={15} />Deliver by {day(p.deliver_by)}{p.deliver_by_defaulted && ' (next delivery day, none was given)'}</span>
         <span><Icon name="pin" size={15} />{p.site}</span>
-        <span><Icon name="user" size={15} />Asked by {who(p.created_by)}, {ago(p.created_at)}</span>
+        <span><Icon name="user" size={15} />{p.request.stock ? 'Proposed by' : 'Asked by'} {who(p.created_by)}{p.request.stock && ' from your stock system'}, {ago(p.created_at)}</span>
       </>} />
 
       <div className="wrap page proposal-grid">
@@ -680,10 +730,11 @@ function ReadRow({ tone, title, field, onFix, children }: { tone: Tone; title: s
 type Fixes = { confirm: () => void; correct: (fix: object) => Promise<boolean>; busy: boolean; open: boolean };
 function ReadBack({ p, fx }: { p: any; fx: Fixes }) {
   const [editing, setEditing] = useState<string | null>(null);
-  const rb = p.read_back, r = p.request, rc = r.recipe, c = p.confirmation;
+  const rb = p.read_back, r = p.request, rc = r.recipe, st = r.stock, c = p.confirmation;
   const limits = [...r.diets, ...r.exclude_allergens];
   const fix = fx.open && !editing ? setEditing : undefined;
-  const heading = rc ? 'From the recipe' : rb ? 'What the agent understood' : 'What was asked';
+  const heading = rc ? 'From the recipe' : st ? 'Why the agent ordered' : rb ? 'What the agent understood' : 'What was asked';
+  const su = st && unitLabel(r.items[0].unit), refill = st && Math.ceil(st.par - st.on_hand - st.incoming);
   return (
     <section className={`panel understood ${c.required ? 'pending' : ''}`} id="understood" aria-labelledby="understood-h">
       <div className="panel-head">
@@ -691,6 +742,7 @@ function ReadBack({ p, fx }: { p: any; fx: Fixes }) {
         {rc && <a className="small" href={rc.url} target="_blank" rel="noreferrer">Original recipe<Icon name="external" size={12} /></a>}
       </div>
       {rc ? <p className="muted">{rc.name} serves {rc.yield}. Scaled to {num(rc.portions)} portions, every amount × {num(rc.portions / rc.yield)}, rounded up to 10 g.</p>
+        : st ? <p className="stock-why">Your stock system shows <strong>{num(st.on_hand)} {su} of {st.name.toLowerCase()}</strong> left. The kitchen uses about {num(st.daily_use)} {su} a day, so it lasts {lasts(st.on_hand / st.daily_use)}. The agent refills it to your usual level of {num(st.par)} {su}{st.incoming ? `, counting ${num(st.incoming)} ${su} already on the way` : ''}.</p>
         : rb ? <blockquote>{rb.text}</blockquote>
         : <p className="muted">Entered as a form or by an agent, so there are no original words to compare with.</p>}
 
@@ -699,12 +751,13 @@ function ReadBack({ p, fx }: { p: any; fx: Fixes }) {
           {rc ? <ReadRow onFix={fix} tone="ok" title={`${num(rc.portions)} portions`} field="portions">{p.items.length} ingredients to buy</ReadRow>
             : r.items.map((it: any, i: number) => (
               <ReadRow key={i} onFix={fix} tone={!rb || rb.items[i].quantity_in_text ? 'ok' : 'warn'} title={`${num(it.quantity)} ${unitLabel(it.unit)} ${it.need}`} field={`item-${i}`}>
-                {!rb ? undefined : !rb.items[i].quantity_in_text ? 'This amount is not in your words. Check it before approving.'
+                {st ? (it.quantity === refill ? `${num(st.par)} ${su} usual level − ${num(st.on_hand + st.incoming)} ${su} left` : `You changed it; the agent proposed ${num(refill)} ${su}.`)
+                  : !rb ? undefined : !rb.items[i].quantity_in_text ? 'This amount is not in your words. Check it before approving.'
                   : rb.items[i].words ? `You wrote “${rb.items[i].words}”; Finnish product names use “${it.need}”.` : 'As you wrote it.'}
               </ReadRow>
             ))}
           <ReadRow onFix={fix} tone={!rb || rb.deliver_by === 'text' ? 'ok' : 'info'} title={`Deliver by ${day(r.deliver_by)}`} field="date">
-            {r.deliver_by_defaulted ? 'No date was given, so the next delivery day.' : rb?.deliver_by === 'interpreted' ? 'Worked out from your wording.' : rb ? 'As you wrote it.' : undefined}
+            {st ? 'Before the stock runs out.' : r.deliver_by_defaulted ? 'No date was given, so the next delivery day.' : rb?.deliver_by === 'interpreted' ? 'Worked out from your wording.' : rb ? 'As you wrote it.' : undefined}
           </ReadRow>
           {limits.map((k: string) => (
             <ReadRow key={k} onFix={fix} tone={rb?.added_limits.includes(k) ? 'warn' : 'ok'} title={limitLabel(k)} field="limits">
@@ -727,8 +780,8 @@ function ReadBack({ p, fx }: { p: any; fx: Fixes }) {
           {c.done ? <p className="confirmed"><Icon name="check" size={16} />You confirmed this is what you meant{c.done.at && `, ${ago(c.done.at)}`}.</p>
             : c.skipped_by_trust ? <p className="confirmed"><Icon name="spark" size={16} />No need to confirm: you approved {c.threshold} orders in a row without fixes. Fix anything that is off.</p>
             : c.required ? <>
-              <p><strong>Is this what you meant?</strong> Confirm it, or fix what is off. Approving stays locked until then.</p>
-              <button className="btn lime" disabled={fx.busy} onClick={fx.confirm}><Icon name="check" />Yes, this is what I meant</button>
+              <p><strong>{st ? 'Do you need this?' : 'Is this what you meant?'}</strong> Confirm it, or fix what is off. Approving stays locked until then.</p>
+              <button className="btn lime" disabled={fx.busy} onClick={fx.confirm}><Icon name="check" />{st ? 'Yes, we need this' : 'Yes, this is what I meant'}</button>
             </> : <p className="muted small">The agent finished this order within your policy. Fix anything that is off and it is planned again.</p>}
         </div>
       )}

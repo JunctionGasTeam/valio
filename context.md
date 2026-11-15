@@ -140,6 +140,17 @@ Valio Aimo publishes 2,091 professional-kitchen recipes (JSON search API `valioa
 - **Trust**: no source text, so `matches_request_text` does not apply; instead the proposal shows every quantity traced to its recipe line (`0,900 kg täysjyväpastaa × 120/18 portions = 6 kg`) and every skipped line. `usual_quantity` applies as usual.
 - **Coverage today** (100 portions, Wed 18 Nov, recorded): 7 of 15 recipes fully covered; the gaps are cut-offs (E6), not deliverable (E2), and a few products not in the dataset (E1: Valio curd fillings, tyrnimehu, fresh strawberries).
 - Not built: menus of several recipes with shared ingredients summed; MCP tools for recipes.
+
+### 4c. Stock system → refill (mock)
+
+Kitchens keep stock in their own software. The agent reads it and proposes a refill before something runs out, so the order starts from data, not from a person remembering.
+
+- **Source**: `src/stock.ts` stands in for the kitchen's stock system: per product a name, the need (Finnish search term), unit, diets, amount on hand, daily use and par level (the level the kitchen refills to). Fixed readings for Hotel Kaisla; nothing moves when orders arrive. A real connector returns the same shape (§15.8).
+- **Rule**: lasts = on hand ÷ daily use. Under 3 days → running low; refill = par − on hand − already on the way (open proposals made from stock, so a second check does not repeat them; a rejected refill makes it low again); deliver by the last full day it still lasts (at least tomorrow).
+- **Routes**: `GET /stock` (levels, what is low, open refills); `POST /stock/check` (MCP `check_stock`): one proposal per low product, made by the customer's agent key even when the owner presses the button, so its limits apply and the kill switch stops it (403). One per product so a routine refill can finish alone while a new product waits.
+- **Trust**: quantities are computed by the gateway, not read from words, so `matches_request_text` does not apply (like recipes); `usual_quantity` still catches a bad reading. The proposal carries `request.stock` (the reading it came from); the app shows "Why the agent ordered" (3 kg left, 1.5 kg a day, lasts 2 days, refill to 13 kg) and asks "Do you need this?" instead of "Is this what you meant?". A correction keeps the reading.
+- **Demo data**: milk (80 l, 40 l/day, par 280 → 200 l by Mon 16 Nov) and butter (3 kg, 1.5 kg/day, par 13 → 10 kg) run low; cheese, cream, rice, eggs do not.
+- Not built: real connectors, consumption forecasts, menu plans (recipes × days) as a source of future use, a schedule (the check runs on request).
 ---
 
 ## 5. Gateway interface (MCP tools = REST routes)
@@ -156,6 +167,7 @@ Valio Aimo publishes 2,091 professional-kitchen recipes (JSON search API `valioa
 | `export_proposal` · `GET /proposals/{id}/export` | human (approved), agent (only `auto_approved`) | Webshop import CSV: `gtin;product_id;name;quantity;sales_unit;unit_price_eur;line_total_eur;delivery_date`, `;` separated, decimal comma, UTF-8 BOM. Layout is a placeholder until 15.2 is answered. Marks the proposal `exported`, file hash in the audit |
 | `POST /parse` | agent, user | Free text → `PurchaseRequest` or a clarification question |
 | `GET /proposals` | agent, user | Latest proposals of the caller's customer |
+| `check_stock` · `POST /stock/check`, `GET /stock` | agent, user | Read the kitchen's stock system (mock, §4c); a refill proposal per product running low, made under the agent key |
 | `GET /policy`, `PUT /policy` | owner (agents read only) | Customer policy (section 8) |
 | `GET /agents`, `PUT /agents` | owner (agents read only) | Kill switch: all agent keys of the customer on or off, effective at once, audited |
 | `GET /audit` | all | Decision records |
@@ -245,7 +257,7 @@ Before approval the gateway re-runs `check_offers` for the chosen lines. If pric
 7. *(Now a policy setting, 8.2.)* Organisers: an amount ≥ 999999 means "unknown, any quantity may be ordered", so a line without a confirmed amount (E5) is not a fixed risk. By default it still needs a person (`confirmed_stock`); the owner can accept it with `allow_unconfirmed_stock`. While it is off, an agent finishing alone switches to the sure-delivery option and keeps it only if every check passes; otherwise the person sees the best option with the sure one next to it.
 8. Plausible but wrong requests (the person typed or the agent read 1000 for 100) pass every other rule, so:
    - `matches_request_text`: with a source text, every item quantity must be a number written in it (500 g → 0.5 kg counts). An agent that misreads, or revises a quantity later, needs a human. An agent that sends no source text fails the rule too (nothing to check against); people using the form and recipes are exempt.
-   - `usual_quantity`: with at least 3 approved past orders in the same category and unit, a quantity ≥ 3× or ≤ ⅓ of their median needs a human ("usually 200 l"). Demo: the 1,000 l request after five ~200 l orders.
+   - `usual_quantity`: with at least 3 approved past orders in the same category and unit, a quantity ≥ 3× or ≤ ⅓ of their median needs a human ("usually 200 l"). Demo: the 1,000 l request after three ~200 l orders.
    - Read-back: every proposal shows the original text next to the request as understood. Each field is marked from the text, assumed (date, priorities) or not in the text (quantity, added limit). Computed by rules (`readBack`), so it also checks an outside agent's interpretation.
 
 ### 8.1a Confirm what was meant
@@ -341,18 +353,26 @@ Stock products have cut-off 15 Nov 17:00; Terminal products report 12 Nov (E6).
 
 ### 11.2 Scenes (3 minutes)
 
-1. **Request (outside agent)**: in Claude Desktop, connected to our gateway over MCP, say the brief's sentence. The agent calls `search_products`, `check_offers`, `create_proposal`. Point: an outside agent works through an open standard. Even if the agent forgets the diet, the keyword detector adds "lactose-free" from its `source_text` (checked in the dry run).
-2. **Proposal**: open the app. The best option: 1,000 × Valio Eila, €1,010, flagged "Delivery not confirmed"; next to it the sure-delivery option, 384 + 51 + 565 l across three Arla products, €2,580.64 (+€1,570.64). The 0.5 l product is not available (E2); Terminal products dropped for a passed cut-off (E6). Each line says why.
-3. **Guardrail**: the agent tries to finalise; the gateway answers `requires_human` (delivery guarantee, over €500, 5× the usual 200 l). The agent tells its user so.
-4. **Human**: confirm "this is what I meant" (or Fix), weigh the risk, click "Use the sure-delivery option" or keep Eila. Approve (prices re-checked first): the "Order approved" dialog, then "Download webshop file".
-5. **Trust**: after `npm run demo:reset` (five ~200 l orders, sure-delivery option taken, approved) the banner suggests "routine orders up to €550". Accept it; the agent orders 200 l: finished on its own from confirmed stock (Arla, €496), the pop-up says so. It orders 1,000 l: waits for a person ("Usual amount"). With "Accept products without a confirmed stock amount" switched on in Policy, the same 200 l goes to the cheapest product (Valio Eila, about €202) instead.
-6. *(optional)* **Recipe**: Recipes → a soup → 120 portions → Plan order. Every line traced to the recipe, Valio products named in the recipe used first, a passed cut-off shown on its line.
-7. **Path to production**: show the file and the decision record; one line on importing it into today's webshop cart ("Tuo tiedostosta") and where the order API would plug in. Trust ladder banner as the closing line.
+Arc: trust is earned in front of the audience, used once, then stopped at its limit. Before: `npm run demo:reset` (two ~200 l milk orders, sure-delivery option taken, approved). Dry run on 2026-11-14 against the live API gave the numbers below.
+
+The whole demo runs in the app (New order page). An outside agent over MCP (Claude Desktop, README) gets exactly the same behaviour; it must pass the person's words as `source_text`, or its proposal always waits for a person.
+
+1. **Request**: type *"I need 200 litres of lactose-free milk by Monday."* The agent plans it.
+2. **Human**: Best option 200 × Valio Eila, €202, flagged "Delivery is not confirmed"; next to it the sure-delivery option, 200 × Arla, €496. It waits for you: the policy says a person signs off. Confirm "this is what I meant", click "Use the sure-delivery option", approve (prices re-checked first).
+3. **Trust**: that was the third unchanged approval, so the banner appears: "Let the agent finish routine orders up to €500 on its own?" Accept it.
+4. **Autonomy**: ask for 200 l again: no "is this what you meant" step, the agent finishes the order on its own from confirmed stock (Arla, €496); the page says "Finished by the agent".
+5. **Limit**: the brief's sentence, 1,000 l: the agent stops. "5× your usual amount", over the €500 limit, delivery not confirmed; the sure-delivery option is a split, 384 + 51 + 565 l across three products, €2,580.64. Each line says why.
+6. **Other products**: *"10 kg of butter, 25 kg of rice and 20 kg of eggs by Monday"*: one order, three lines, €194.06 (Valio voi, Agrino rice in 10 kg bags, Kieku eggs). It waits for a person ("New for the agent"): trust earned on milk does not cover butter. Not in the recorded cache: needs the live API.
+6a. **Stock**: the Stock page shows milk and butter running low. "Let the agent refill 2 items": milk (200 l, routine) is finished by the agent on its own (Arla, €496, pop-up); butter (10 kg, €66) waits: new for the agent, delivery not confirmed. The proposal says why: "3 kg left, about 1.5 kg a day, lasts 2 days, refill to 13 kg". Offers recorded by `npm run record`.
+7. *(optional)* **Recipe**: Recipes → a soup → 120 portions → Plan order. Every line traced to the recipe, Valio products named in the recipe used first, a passed cut-off shown on its line.
+8. **Path to production**: show the file and the decision record; one line on the webshop's cart import ("Tuo tiedostosta") and where the order API would plug in.
+
+Policy switch worth one sentence: with "Accept products without a confirmed stock amount" on, the agent keeps the cheapest product (Eila) instead of the sure option.
 
 ### 11.3 Demo safety
 
 - Record all API responses used by the scenes into `offer_cache` the day before (`npm run record`); the demo reads the cache if the API is slow or down, and says so on screen ("API trouble, cached offers used", which also makes the proposal need a human). `VALIO_TIMEOUT_MS` shortens the wait on a slow network.
-- `npm run demo:reset` empties proposals and the decision record and adds five small milk orders approved unchanged, so the trust-ladder banner is on screen for the closing line. Demo fixture only.
+- `npm run demo:reset` empties proposals and the decision record and adds two small milk orders approved unchanged, so the third approval, made live, brings up the trust-ladder banner. Demo fixture only.
 - `npm run demo` serves the UI and the API from one process.
 - Fixed demo clock (`DEMO_NOW`), so cut-offs behave the same at judging time.
 - Never touch the shared webshop account during the demo.
@@ -398,3 +418,4 @@ Team split and timeline: planning notes, not behaviour. See git history.
 5. Team size, pitch slot and whether judging happens before Sunday 17:00 (the stock cut-off in the mock data).
 6. May we use Valio Aimo's public recipes (§4b) in the demo? We keep 15 locally, fetched once, not published.
 7. Does "amount unknown" (≥ 999999) carry any real risk of non-delivery? Decides the default of `allow_unconfirmed_stock`.
+8. Which stock or kitchen management systems do Valio Aimo customers use, and do they offer an API or an export? (The stock refill in §4c is a mock until then.)

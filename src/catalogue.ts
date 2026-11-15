@@ -67,12 +67,16 @@ export function search(db: DatabaseSync, text: string, limits: Limits = {}, limi
   let rows: any[] = fts.all(terms.join(' AND '));
   if (!rows.length) rows = fts.all(terms.join(' OR '));
 
-  const votes = new Map<string, number>();
-  for (const r of rows) votes.set(r.category, (votes.get(r.category) ?? 0) + 1);
-  const category = [...votes].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? null;
-  // Stable sort: categories with more hits first, bm25 order inside.
+  // Short words hide inside others ("voi" in voileipä, porvoo): when some names have the term as a word of its own,
+  // only those pick the first category. Otherwise butter loses to the sandwich-biscuit category and is never priced.
+  const words = terms.map((t) => new RegExp(`(?<![\\p{L}\\p{N}])${t.slice(1, -1)}(?![\\p{L}\\p{N}])`, 'u'));
+  const whole = rows.filter((r) => words.some((w) => w.test(`${r.name_fi} ${r.name_en} ${r.name_sv}`.toLowerCase())));
+  const count = (rs: any[]) => { const m = new Map<string, number>(); for (const r of rs) m.set(r.category, (m.get(r.category) ?? 0) + 1); return m; };
+  const votes = count(rows);
+  const category = [...count(whole.length ? whole : rows)].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? null;
+  // Stable sort: the chosen category first, then categories with more hits, bm25 order inside.
   rows = rows.map((r, i) => ({ r, i }))
-    .sort((a, b) => votes.get(b.r.category)! - votes.get(a.r.category)! || a.i - b.i)
+    .sort((a, b) => +(b.r.category === category) - +(a.r.category === category) || votes.get(b.r.category)! - votes.get(a.r.category)! || a.i - b.i)
     .slice(0, pool).map((x) => x.r);
 
   const matches: Product[] = [];
