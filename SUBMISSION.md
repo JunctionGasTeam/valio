@@ -2,6 +2,8 @@
 
 **A trusted purchasing agent for Valio Aimo. Trust isn't given. It's earned.**
 
+Try it: sign up with the invite code `gasteamInvite`.
+
 ## The problem
 
 Ordering is moving from people clicking through a webshop to AI agents buying for them. Valio Aimo serves 20,000+ professional kitchens with 25,000 products from 700 suppliers. An agent can already look up products and build an order. The hard part is the last step: when do you let it approve on its own, and what stops it when it shouldn't?
@@ -29,7 +31,7 @@ The guardrails live in an open gateway, not in the agent. Any agent (Claude, GPT
 Local full-text search over the 17,546 products of the dataset in Finnish, English and Swedish, filtered by diet, allergen, label and origin. Valio's price and availability API is asked only for a shortlist of at most 50 products, never for all.
 
 **5. What if the exact request cannot be met?**
-Nine named exceptions, each with a plan: no match, not deliverable, late, partial stock (split across up to three products), unknown stock (a sure-delivery option from confirmed stock is shown next to the cheapest one), order cut-off passed, no price, missing allergen data, API down (cached offers, and a person must approve).
+Nine named exceptions, each with a plan. Partial stock is split across up to three products. For unknown stock, a sure-delivery option is shown next to the cheapest one. If the API is down, cached offers are used and a person must approve.
 
 **6. How do you choose on more than price?**
 Every option is scored on price, availability, delivery reliability, CO2 and Finnish origin.
@@ -37,31 +39,35 @@ Every option is scored on price, availability, delivery reliability, CO2 and Fin
 **7. How does a person know what the agent did and why?**
 Each line carries a reason built from computed facts. The proposal shows what the agent understood next to the person's own words. Every step is written to an append-only decision record.
 
-**8. How do you stop the language model from making costly mistakes?**
-The model only turns text into a structured request and checks product types. It never decides price, allergens, quantities or approval. With the model off, everything runs on rules.
-
-**9. Who remembers to order?**
+**8. Who remembers to order?**
 The agent reads the kitchen's stock system (mocked) and proposes refills before something runs out. It also turns a recipe and a number of portions into an order, each line traced to the recipe.
 
-## Demo story
+## How we use the Google Gemini API
 
-Hotel Kaisla has ordered milk through the agent twice before.
+Gemini (structured JSON output, temperature 0) does the three language jobs rules cannot:
+
+- **Understands the request.** "Oat bread for Monday" in English, Finnish or Swedish becomes the Finnish product noun, quantity, date and diets.
+- **Checks the product type.** Among search hits it tells oat bread from an oat bread mix. It can only remove candidates, never add one.
+- **Reads recipes.** It turns ingredient lines into things to buy and skips water and salt.
+
+Gemini never decides price, allergens, quantities or approval. Rules re-check what it returns, and if it is off or slow, everything runs on rules.
+
+## Demo story
 
 1. An unexpected party on Monday: 200 litres of lactose-free milk. The agent shows the cheapest option (€202, stock not confirmed) next to a sure-delivery one (€496). The owner checks and approves.
 2. That was the third clean approval. The system suggests autonomy up to €500; the owner accepts.
 3. The manager calls: twice as many guests, another 200 litres. The agent finishes the order on its own.
 4. 1,000 litres, the brief's own example: the agent stops. Five times the usual amount, over the limit.
-5. Stock runs low on milk and butter. The agent refills milk alone; butter waits for a person, because it has never bought butter for this kitchen.
 
 ## Tech
 
-TypeScript on Node, one codebase. Hono with zod-openapi (REST + OpenAPI 3.1), the Model Context Protocol SDK (the same functions as MCP tools), SQLite with FTS5, React + Vite, Gemini through an OpenAI-compatible endpoint. 41 automated tests cover the whole flow.
+TypeScript on Node, one codebase. Hono with zod-openapi (REST + OpenAPI 3.1), the Model Context Protocol SDK, SQLite with FTS5, React + Vite, Google Gemini API. 41 automated tests.
 
 ## Honest limits
 
 - No real order is placed: there is no order API. The result is an approved order file by GTIN; its layout is not yet verified against the webshop import.
-- The stock system is a mock, and the demo runs on a fixed clock because the mock data's cut-offs are static.
+- The stock system is a mock, and the demo runs on a fixed clock.
 
 ## Next
 
-A real order API plugs in where the order file is today; nothing else changes. Valio told us human approval is required now and may be relaxed if reliability proves good. The trust ladder makes that path measurable, per customer and per product.
+A real order API plugs in where the order file is today; nothing else changes. Valio told us human approval may be relaxed if reliability proves good. The trust ladder makes that measurable.
