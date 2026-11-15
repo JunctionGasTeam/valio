@@ -1,5 +1,5 @@
 {
-  "name": "trusted-trade-agents",
+  "name": "earnest",
   "private": true,
   "type": "module",
   "engines": {
@@ -15,6 +15,7 @@
     "ui:build": "vite build ui",
     "record": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/record.ts",
     "demo": "vite build ui && DEMO_NOW=2026-11-14T12:00:00+0200 node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/api.ts",
+    "host": "vite build ui && HOSTED=1 DEMO_NOW=2026-11-14T12:00:00+0200 node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/api.ts",
     "demo:reset": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/demo-reset.ts",
     "recipes": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/recipes-fetch.ts"
   },

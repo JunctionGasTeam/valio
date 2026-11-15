@@ -20,6 +20,8 @@ export function openDb(path = DB_PATH) {
     CREATE TABLE IF NOT EXISTS tokens (
       token TEXT PRIMARY KEY, customer TEXT REFERENCES customers(id), name TEXT,
       role TEXT CHECK (role IN ('owner', 'agent')), limits TEXT, revoked INTEGER DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS users (
+      email TEXT PRIMARY KEY, customer TEXT REFERENCES customers(id), name TEXT, salt TEXT, hash TEXT, created_at TEXT);
     CREATE TABLE IF NOT EXISTS proposals (
       id TEXT PRIMARY KEY, customer TEXT REFERENCES customers(id), status TEXT, request TEXT, items TEXT, verdict TEXT,
       created_by TEXT, created_at TEXT, updated_at TEXT);

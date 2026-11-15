@@ -23,7 +23,8 @@ const STOCK: Record<string, { site: string; items: Reading[] }> = {
     ],
   },
 };
-export const stockOf = (customer: string) => STOCK[customer] ?? null;
+// Every kitchen registered in the app is a copy of the demo kitchen, so it reads the same stock system.
+export const stockOf = (customer: string) => STOCK[customer] ?? STOCK.kaisla;
 
 // Running low: lasts less than this many days. The refill is wanted before it runs out, never later than that.
 export const LOW_DAYS = 3;

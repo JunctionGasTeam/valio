@@ -13,7 +13,7 @@ const tmp = join(tmpdir(), `tta-test-${process.pid}.db`);
 openDb().exec(`VACUUM INTO '${tmp}'`);
 // Catalogue + recorded offers from the real DB, but none of its demo state (proposals, decision record, saved policy).
 const fresh = openDb(tmp);
-fresh.exec(`DROP TABLE audit; DROP TABLE proposals; DROP TABLE tokens; DROP TABLE customers;`);
+fresh.exec(`DROP TABLE audit; DROP TABLE proposals; DROP TABLE tokens; DROP TABLE users; DROP TABLE customers;`);
 fresh.close();
 const db = openDb(tmp);
 seed(db);
@@ -357,4 +357,35 @@ test('MCP: an outside agent gets the same guardrails and no approve tool', async
     await client.close();
     server.close();
   }
+});
+
+test('accounts: invite code, a kitchen of your own with the demo history, sessions; hosted mode switches the demo tokens off', async () => {
+  process.env.INVITE_CODE = 'letmein';
+  const who = { name: 'Judge', email: 'Judge@Example.com', password: 'correct horse' };
+  assert.equal((await call(null, 'POST', '/auth/register', who)).status, 403);
+  const r = await call(null, 'POST', '/auth/register', { ...who, invite: 'letmein' });
+  delete process.env.INVITE_CODE;
+  assert.deepEqual([r.status, r.body.history], [200, 2]);
+  assert.equal((await call(null, 'POST', '/auth/register', who)).status, 409);
+
+  // Own kitchen: the two approved milk orders of the demo history, none of the demo kitchen's proposals.
+  const mine = (await call(r.body.token, 'GET', '/proposals')).body;
+  assert.deepEqual(mine.map((p: any) => p.status), ['approved', 'approved']);
+  const theirs = (await call('demo-owner', 'GET', '/proposals')).body.map((p: any) => p.id);
+  assert.ok(theirs.length && mine.every((p: any) => !theirs.includes(p.id)));
+  assert.equal((await call(r.body.token, 'GET', `/proposals/${theirs[0]}`)).status, 404);
+  assert.equal((await call(r.body.token, 'GET', '/trust')).body.streak, 2); // the third approval earns trust, as in the demo
+  assert.equal((await call(r.body.token, 'GET', '/stock')).status, 200);
+
+  assert.equal((await call(null, 'POST', '/auth/login', { email: 'judge@example.com', password: 'wrong password' })).status, 401);
+  const s = (await call(null, 'POST', '/auth/login', { email: 'judge@example.com', password: 'correct horse' })).body;
+  assert.deepEqual((await call(s.token, 'GET', '/me')).body, { name: 'Judge', role: 'owner', email: 'judge@example.com', kitchen: 'Hotel Kaisla' });
+  await call(s.token, 'POST', '/auth/logout');
+  assert.equal((await call(s.token, 'GET', '/me')).status, 401);
+
+  process.env.HOSTED = '1'; seed(db);
+  assert.equal((await call('demo-owner', 'GET', '/policy')).status, 401);
+  assert.equal((await call(null, 'GET', '/auth/config')).body.demo_kitchen, false);
+  delete process.env.HOSTED; seed(db);
+  assert.equal((await call('demo-owner', 'GET', '/policy')).status, 200);
 });

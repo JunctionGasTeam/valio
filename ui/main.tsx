@@ -1,14 +1,16 @@
 // Ordering UI (context.md §11.2). One path for every order: ask → agent plans → you check → approve → send to webshop.
 // Every check, limit and choice is explained in plain words where it appears.
-import { StrictMode, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { StrictMode, useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 
 type Tone = 'ok' | 'warn' | 'bad' | 'info' | 'neutral';
 
-// One person runs the app (the owner); the AI agent works through MCP with its own, limited key.
-// ponytail: fixed demo token; real login when this leaves the demo.
-const TOKEN = 'demo-owner';
+// One person runs each kitchen (the owner); the AI agent works with its own, limited key. The owner's session token
+// stays in this browser; `demo-owner` is the shared demo kitchen, offered only when the server is not hosted.
+const TOKEN_KEY = 'earnest-token';
+const storedToken = () => { try { return localStorage.getItem(TOKEN_KEY) ?? ''; } catch { return ''; } };
+const storeToken = (t: string) => { try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch { /* private window: this tab only */ } };
 
 // Labels for the planner's flags. Codes never reach the screen; `help` is shown next to the label where it appears.
 const FLAGS: Record<string, { label: string; tone: Tone; help: string }> = {
@@ -88,6 +90,8 @@ async function api(token: string, method: string, path: string, body?: unknown) 
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
   });
   const j = await res.json().catch(() => ({}));
+  // A session that ended (signed out elsewhere, server reset): back to the sign-in screen.
+  if (res.status === 401 && token) { storeToken(''); location.reload(); }
   if (!res.ok) throw new ApiError(j.error ?? res.statusText, j);
   return j;
 }
@@ -220,9 +224,68 @@ function AgentFinished({ rows }: { rows: any[] | null }) {
   );
 }
 
-// ---------- Shell ----------
+// ---------- Sign in ----------
 function App() {
-  const token = TOKEN;
+  const [token, setToken] = useState(storedToken);
+  const use = (t: string) => { storeToken(t); setToken(t); };
+  if (!token) return <><Auth onToken={use} /><Toasts /></>;
+  const signOut = () => api(token, 'POST', '/auth/logout').catch(() => null).finally(() => { location.hash = ''; use(''); });
+  return <Shell key={token} token={token} signOut={signOut} />;
+}
+
+function Auth({ onToken }: { onToken: (token: string) => void }) {
+  const [cfg, setCfg] = useState<{ invite_required?: boolean; demo_kitchen?: boolean } | null>(null);
+  const [mode, setMode] = useState<'up' | 'in'>('up');
+  const [f, setF] = useState({ name: '', email: '', password: '', invite: '' });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  useEffect(() => { api('', 'GET', '/auth/config').then(setCfg, () => setCfg({})); }, []);
+  const set = (k: keyof typeof f) => (e: ChangeEvent<HTMLInputElement>) => setF({ ...f, [k]: e.target.value });
+  const submit = async (e: FormEvent) => {
+    e.preventDefault(); setBusy(true); setErr('');
+    try {
+      const r = await api('', 'POST', mode === 'up' ? '/auth/register' : '/auth/login', mode === 'up' ? f : { email: f.email, password: f.password });
+      onToken(r.token);
+    } catch (x) {
+      const m = (x as Error).message;
+      setErr(m === 'invalid request' ? 'Check the fields: a valid email, and a password of at least 8 characters.' : m);
+      setBusy(false);
+    }
+  };
+  const up = mode === 'up';
+  return (
+    <main id="main" className="auth">
+      <div className="panel auth-card">
+        <span className="brand">
+          <span className="brand-mark"><Icon name="shield" size={18} /></span>
+          <span className="brand-name">Earnest<small>trust isn't given, it's earned</small></span>
+        </span>
+        <p className="muted">A purchasing agent for Valio Aimo that earns your trust one approved order at a time.
+          {up && ' Your account comes with a kitchen of its own: Hotel Kaisla, with two milk orders you approved before.'}</p>
+        <div className="segmented" role="group" aria-label="Account">
+          <button type="button" aria-pressed={up} onClick={() => { setMode('up'); setErr(''); }}>Create account</button>
+          <button type="button" aria-pressed={!up} onClick={() => { setMode('in'); setErr(''); }}>Sign in</button>
+        </div>
+        <form onSubmit={submit}>
+          {up && <div className="field"><label htmlFor="a-name">Your name</label><input id="a-name" required autoComplete="name" value={f.name} onChange={set('name')} /></div>}
+          <div className="field"><label htmlFor="a-email">Email</label><input id="a-email" type="email" required autoComplete="email" value={f.email} onChange={set('email')} /></div>
+          <div className="field"><label htmlFor="a-pw">Password</label><input id="a-pw" type="password" required minLength={8} autoComplete={up ? 'new-password' : 'current-password'} value={f.password} onChange={set('password')} /></div>
+          {up && cfg?.invite_required && <div className="field"><label htmlFor="a-invite">Invite code</label><input id="a-invite" required autoComplete="off" value={f.invite} onChange={set('invite')} /></div>}
+          {err && <Callout tone="bad">{err}</Callout>}
+          <button className="btn lime block" disabled={busy} aria-busy={busy}>
+            {busy ? <><Icon name="loader" className="spin" />{up ? 'Setting up your kitchen…' : 'Signing in…'}</> : up ? 'Create account' : 'Sign in'}
+          </button>
+        </form>
+        {cfg?.demo_kitchen && <button type="button" className="btn quiet block" onClick={() => onToken('demo-owner')}>Use the demo kitchen</button>}
+      </div>
+    </main>
+  );
+}
+
+// ---------- Shell ----------
+function Shell({ token, signOut }: { token: string; signOut: () => void }) {
+  const [me, setMe] = useState<{ name: string } | null>(null);
+  useEffect(() => { api(token, 'GET', '/me').then(setMe, () => null); }, [token]);
   const hash = useHash();
   const rows = usePoll<any[]>(() => api(token, 'GET', '/proposals'), 5000, [token]);
   const waiting = rows?.filter((r) => r.status === 'needs_review').length ?? 0;
@@ -236,14 +299,14 @@ function App() {
       <div className="utility">
         <div className="wrap">
           <span><Icon name="pin" size={14} />Hotel Kaisla, Helsinki</span>
-          <span><Icon name="user" size={14} />Signed in as Owner</span>
+          <span><Icon name="user" size={14} />Signed in as {me?.name ?? '…'}<button type="button" className="signout" onClick={signOut}>Sign out</button></span>
         </div>
       </div>
       <header className="masthead">
         <div className="wrap">
-          <a href="#" className="brand" aria-label="Order agent, home">
+          <a href="#" className="brand" aria-label="Earnest, home">
             <span className="brand-mark"><Icon name="shield" size={18} /></span>
-            <span className="brand-name">Order agent<small>for Valio Aimo customers</small></span>
+            <span className="brand-name">Earnest<small>trust isn't given, it's earned</small></span>
           </a>
           <nav className="nav" aria-label="Main">
             <a href="#" aria-current={here(['home', 'proposal'])}>Orders{waiting > 0 && <span className="count" aria-label={`${waiting} waiting for a decision`}>{waiting}</span>}</a>
@@ -1178,7 +1241,7 @@ function NewOrder({ token }: { token: string }) {
         <label htmlFor="text" className="ask-label">What do you need, how much, and by when?</label>
         <div className="ask-box">
           <textarea id="text" rows={3} value={text} onChange={(e) => setText(e.target.value)} required
-            placeholder="e.g. 1,000 litres of lactose-free milk by Monday"
+            placeholder="What do we order today?"
             onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) e.currentTarget.form?.requestSubmit(); }} />
           <div className="ask-bar">
             <VoiceInput onText={setText} disabled={busy} />

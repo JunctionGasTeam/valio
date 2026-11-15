@@ -24,7 +24,7 @@ async function gateway(method: string, path: string, body?: unknown) {
 const AFTER = 'The response carries `requires_human` and `next`: tell your user exactly what happens next. '
   + 'You cannot approve; a person signs off in the app unless the policy lets the proposal finalise automatically.';
 
-const server = new McpServer({ name: 'trusted-trade-agents', version: '0.1.0' });
+const server = new McpServer({ name: 'earnest', version: '0.1.0' });
 const readOnly = { readOnlyHint: true, openWorldHint: false };
 
 server.registerTool('search_products', {

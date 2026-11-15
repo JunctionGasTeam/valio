@@ -1,4 +1,4 @@
-# Trusted Trade Agents: product specification
+# Earnest: product specification
 
 An AI purchasing agent that buys food from Valio Aimo safely, openly and with the right human sign-off.
 
@@ -100,6 +100,8 @@ Data quality that shapes the rules:
 | Admin | Our team / Valio service desk | — | Read all decision records (the kill switch itself is the owner's: Policy page, `PUT /agents`) |
 
 An agent key belongs to one customer and carries its own limits (section 8). Every caller sends `Authorization: Bearer <token>`; a token maps to customer, role and limits (demo tokens `demo-owner` and `demo-agent` are seeded for the demo customer). People have one role on purpose: the line that matters is person vs agent, and an agent can never approve. A customer-level switch turns all its agent keys off (kill switch). The first demo customer is a fictional hotel chain, "Hotel Kaisla", with two sites.
+
+Accounts (hosted demo): a person registers with name, email, password and the invite code (`INVITE_CODE`, when set), and gets a customer of their own, a copy of Hotel Kaisla with the demo history (two approved milk orders), an owner session token and an agent key. Passwords are scrypt-hashed; signing in issues a new owner token, signing out revokes it. `HOSTED=1` (`npm run host`) switches the guessable demo tokens off.
 
 ---
 
@@ -372,7 +374,7 @@ Policy switch worth one sentence: with "Accept products without a confirmed stoc
 ### 11.3 Demo safety
 
 - Record all API responses used by the scenes into `offer_cache` the day before (`npm run record`); the demo reads the cache if the API is slow or down, and says so on screen ("API trouble, cached offers used", which also makes the proposal need a human). `VALIO_TIMEOUT_MS` shortens the wait on a slow network.
-- `npm run demo:reset` empties proposals and the decision record and adds two small milk orders approved unchanged, so the third approval, made live, brings up the trust-ladder banner. Demo fixture only.
+- `npm run demo:reset` empties proposals and the decision record, deletes registered accounts, and adds two small milk orders approved unchanged, so the third approval, made live, brings up the trust-ladder banner. Demo fixture only.
 - `npm run demo` serves the UI and the API from one process.
 - Fixed demo clock (`DEMO_NOW`), so cut-offs behave the same at judging time.
 - Never touch the shared webshop account during the demo.

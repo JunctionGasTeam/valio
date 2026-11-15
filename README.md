@@ -1,4 +1,6 @@
-# Trusted Trade Agents
+# Earnest
+
+*A trusted purchasing agent for Valio Aimo. Trust isn't given, it's earned.*
 
 Valio Aimo challenge, Junction 2026. An open gateway (MCP + REST/OpenAPI) that lets any AI purchasing agent buy food from Valio Aimo: it turns a request ("1,000 litres of lactose-free milk by Monday") into an order proposal with real products, fixed prices, sales units and a reason per line. A policy in the gateway, not in the agent, decides whether the agent may finish the order or a person signs off. Full spec: [context.md](context.md).
 
@@ -36,11 +38,20 @@ Kitchen stock (Stock page, `GET /stock`, MCP `check_stock`) reads a mock of the 
 
 ```sh
 npm run record      # online, the day before: records the offers the scenes use (fallback if the API is down)
-npm run demo:reset  # empty proposals + decision record, 2 approved orders of history (the 3rd, live, brings the trust banner)
+npm run demo:reset  # empty proposals + decision record, deletes registered accounts, 2 approved orders of history (the 3rd, live, brings the trust banner)
 npm run demo        # builds the UI, one process on :8787 (UI at /), clock fixed at 2026-11-14 12:00
 ```
 
 Scenes: context.md §11.2. Set `VALIO_TIMEOUT_MS=2000` if the venue network is slow: the gateway then falls back to the cache sooner and says so.
+
+## Hosting (for judges)
+
+```sh
+INVITE_CODE=<a code you give the judges> npm run host   # UI + API on :8787, demo clock, demo tokens switched off
+cloudflared tunnel --url http://localhost:8787          # brew install cloudflared; prints a temporary https link
+```
+
+Everyone signs up with the invite code and gets a kitchen of their own (Hotel Kaisla with two approved milk orders, so the third approval earns trust). Accounts are isolated from each other. Locally (`npm run demo`) the sign-in screen also offers the shared demo kitchen (`demo-owner`), which `npm run demo:reset` resets (it also deletes every registered account).
 
 ## Claude Desktop (MCP)
 

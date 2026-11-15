@@ -29,7 +29,7 @@ async function post(endpoint: string, ids: string[], date: string): Promise<any[
   const call = () => fetch(`${(process.env.VALIO_API_BASE ?? '').replace(/\/$/, '')}/api/${endpoint}`, {
     method: 'POST',
     headers: { 'X-API-Key': process.env.VALIO_API_KEY ?? '', 'content-type': 'application/json' },
-    body: JSON.stringify({ customer: 'trusted-trade-agents', requestedDate: date, products: ids }),
+    body: JSON.stringify({ customer: 'earnest', requestedDate: date, products: ids }),
     signal: AbortSignal.timeout(Number(process.env.VALIO_TIMEOUT_MS ?? 10_000)), // demo knob: lower it if venue Wi-Fi is slow
   });
   let res = await call();

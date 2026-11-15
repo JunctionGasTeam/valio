@@ -3,7 +3,7 @@ import { OpenAPIHono, createRoute, z, type RouteConfig } from '@hono/zod-openapi
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { openDb } from './db.ts';
 import { search, getProduct } from './catalogue.ts';
@@ -68,14 +68,45 @@ const Revision = z.object({
 }).openapi('Revision');
 const Decision = z.object({ decision: z.enum(['approve', 'reject']), note: z.string().max(1000).optional() }).openapi('Decision');
 
-// ponytail: fixed demo tokens for the fictional customer. Generate real keys before anything leaves localhost.
+// Fixed demo tokens for the fictional customer: local demo, tests, Claude Desktop. Anyone can guess them, so a hosted
+// server (HOSTED=1, `npm run host`) switches them off; people there register and get kitchens of their own.
 export function seed(db: DatabaseSync) {
   db.exec(`
     INSERT OR IGNORE INTO customers (id, name) VALUES ('kaisla', 'Hotel Kaisla');
     INSERT OR IGNORE INTO tokens (token, customer, name, role) VALUES
       ('demo-owner', 'kaisla', 'Owner', 'owner'),
       ('demo-agent', 'kaisla', 'Buyer agent', 'agent');`);
+  db.prepare("UPDATE tokens SET revoked = ? WHERE token IN ('demo-owner', 'demo-agent')").run(process.env.HOSTED ? 1 : 0);
 }
+
+/**
+ * Two small milk orders the owner approved unchanged "in earlier weeks", sure-delivery option taken: the third
+ * approval, made live, earns the trust-ladder suggestion (§8.4). Demo fixture for `npm run demo:reset` and for every
+ * kitchen registered in the app. Needs the demo clock (DEMO_NOW) for its fixed delivery date.
+ */
+export async function seedHistory(app: { request: Hono['request'] }, owner: string, agent: string) {
+  const call = async (token: string, method: string, path: string, body: unknown = {}) => {
+    const res = await app.request(path, { method, body: JSON.stringify(body), headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' } });
+    const j = (await res.json()) as any;
+    if (!res.ok) throw new Error(`${path}: ${res.status} ${j.error}`);
+    return j;
+  };
+  const done: any[] = [];
+  for (const litres of [180, 200]) {
+    const p = await call(agent, 'POST', '/proposals', {
+      site: 'Hotel Kaisla Helsinki', deliver_by: '2026-11-16', items: [{ need: 'maito', quantity: litres, unit: 'l' }], diets: ['lactose_free'],
+      source_text: `${litres} l lactose-free milk by Monday`,
+    });
+    await call(owner, 'PATCH', `/proposals/${p.id}`, { item: 0, confirmed_only: true }); // the agent's own offer: not a fix
+    await call(owner, 'POST', `/proposals/${p.id}/confirm`); // "this is what I meant"
+    done.push(await call(owner, 'POST', `/proposals/${p.id}/decision`, { decision: 'approve', note: 'routine weekly order' }));
+  }
+  return done;
+}
+
+// Passwords: scrypt from node:crypto, a random salt per user. Sessions are ordinary owner tokens (table `tokens`).
+const hashOf = (password: string, salt: string) => scryptSync(password, salt, 32);
+const newToken = () => randomBytes(24).toString('base64url');
 
 const helsinkiToday = () => now().toLocaleDateString('en-CA', { timeZone: 'Europe/Helsinki' });
 const addDays = (d: string, n: number) => new Date(Date.parse(`${d}T12:00:00Z`) + n * 864e5).toISOString().slice(0, 10);
@@ -96,11 +127,12 @@ export function createApp(db: DatabaseSync) {
     defaultHook: (r, c) => { if (!r.success) return c.json({ error: 'invalid request', issues: r.error.issues }, 400); },
   });
   app.openAPIRegistry.registerComponent('securitySchemes', 'bearer', { type: 'http', scheme: 'bearer' });
-  app.doc31('/openapi.json', { openapi: '3.1.0', info: { title: 'Trusted Trade Agents gateway', version: '0.1.0' } });
+  app.doc31('/openapi.json', { openapi: '3.1.0', info: { title: 'Earnest gateway', version: '0.1.0' } });
   app.onError((e, c) => c.json({ error: (e as Error).message }, 500));
 
+  // Open without a token: the OpenAPI document, and signing up / in (the app is mounted at / and at /api).
   app.use('*', async (c, next) => {
-    if (c.req.path === '/openapi.json') return next();
+    if (/\/(openapi\.json|auth\/(config|register|login))$/.test(c.req.path)) return next();
     const token = c.req.header('authorization')?.replace(/^Bearer /i, '');
     const t = token && db.prepare(
       `SELECT t.customer, t.name, t.role, t.limits, c.agents_enabled FROM tokens t JOIN customers c ON c.id = t.customer
@@ -185,6 +217,53 @@ export function createApp(db: DatabaseSync) {
     // check them against. usual_quantity still catches a bad stock reading (a typo in the par level).
     evaluate(db, items, { exclude_allergens: r.exclude_allergens, diets: r.diets, labels_required: r.labels_required, budget_eur: r.budget_eur, source_text: r.source_text, from_agent: r.from_agent && !r.recipe && !r.stock },
       effectivePolicy(policyOf(a.customer), a.role === 'agent' ? a.limits : null), historyOf(a.customer));
+
+  // --- accounts: each person who registers gets a kitchen of their own --------------------------------------------
+  const Credentials = z.object({ email: z.email().max(200), password: z.string().min(8).max(200) });
+  const open = <R extends RouteConfig['request']>(method: 'get' | 'post', path: string, summary: string, request?: R) =>
+    createRoute({ method, path, summary, request: request as R, responses });
+  app.openapi(open('get', '/auth/config', 'What the sign-up form needs (no token)'), (c) =>
+    c.json({ invite_required: !!process.env.INVITE_CODE, demo_kitchen: !process.env.HOSTED }, 200));
+
+  app.openapi(open('post', '/auth/register', 'Create an account with its own demo kitchen; the invite code when the server sets one (no token)',
+    body(Credentials.extend({ name: z.string().trim().min(1).max(100), invite: z.string().max(200).optional() }))), async (c) => {
+    const { email, password, name, invite } = c.req.valid('json');
+    // ponytail: one shared invite code, no rate limit. Enough to keep strangers off the team's API keys for a weekend.
+    if (process.env.INVITE_CODE && invite?.trim() !== process.env.INVITE_CODE) return c.json({ error: 'That invite code is not right.' }, 403);
+    const mail = email.toLowerCase();
+    if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(mail)) return c.json({ error: 'An account with this email exists. Sign in instead.' }, 409);
+    const customer = randomUUID(), salt = randomBytes(16).toString('hex'), owner = newToken(), agent = newToken();
+    db.prepare('INSERT INTO customers (id, name) VALUES (?, ?)').run(customer, 'Hotel Kaisla');
+    db.prepare('INSERT INTO users VALUES (?,?,?,?,?,?)').run(mail, customer, name, salt, hashOf(password, salt).toString('hex'), new Date().toISOString());
+    db.prepare(`INSERT INTO tokens (token, customer, name, role) VALUES (?, ?, ?, 'owner'), (?, ?, 'Buyer agent', 'agent')`).run(owner, customer, name, agent, customer);
+    // The same starting point as the demo: two approved milk orders, so the third approval earns trust.
+    let history = 0;
+    try { history = (await seedHistory(app, owner, agent)).length; } catch (e) { console.error(`history for a new kitchen: ${(e as Error).message}`); }
+    return c.json({ token: owner, name, history }, 200);
+  });
+
+  app.openapi(open('post', '/auth/login', 'Sign in; returns a session token (no token)', body(Credentials)), (c) => {
+    const { email, password } = c.req.valid('json');
+    const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email.toLowerCase()) as any;
+    if (!u || !timingSafeEqual(hashOf(password, u.salt), Buffer.from(u.hash, 'hex'))) return c.json({ error: 'Email or password is not right.' }, 401);
+    const token = newToken();
+    db.prepare(`INSERT INTO tokens (token, customer, name, role) VALUES (?, ?, ?, 'owner')`).run(token, u.customer, u.name);
+    return c.json({ token, name: u.name }, 200);
+  });
+
+  app.openapi(route('post', '/auth/logout', 'End this session'), (c) => {
+    if (c.get('actor').role !== 'owner') return c.json({ error: 'agent keys are revoked by the owner, not signed out' }, 403);
+    // Sessions of registered accounts only: signing out of the shared demo kitchen must not lock everyone out of it.
+    db.prepare('UPDATE tokens SET revoked = 1 WHERE token = ? AND customer IN (SELECT customer FROM users)').run(c.req.header('authorization')!.replace(/^Bearer /i, ''));
+    return c.json({ ok: true }, 200);
+  });
+
+  app.openapi(route('get', '/me', 'Who is signed in, and which kitchen'), (c) => {
+    const a = c.get('actor');
+    const u = db.prepare('SELECT email FROM users WHERE customer = ?').get(a.customer) as any;
+    const k = db.prepare('SELECT name FROM customers WHERE id = ?').get(a.customer) as any;
+    return c.json({ name: a.name, role: a.role, email: u?.email ?? null, kitchen: k.name }, 200);
+  });
 
   // --- catalogue and offers ----------------------------------------------------------------------------------------
   const list = z.string().optional().transform((s) => (s ? s.split(',').map((x) => x.trim()).filter(Boolean) : []));
@@ -567,6 +646,11 @@ export function toCsv(db: DatabaseSync, items: any[]) {
 }
 
 if (import.meta.main) {
+  // Hosted without an invite code, anyone with the link could sign up and spend the team's Valio and LLM keys.
+  if (process.env.HOSTED && !process.env.INVITE_CODE) {
+    console.error('HOSTED=1 needs INVITE_CODE: set it in .env or run `INVITE_CODE=<code> npm run host`.');
+    process.exit(1);
+  }
   const db = openDb();
   seed(db);
   const api = createApp(db);

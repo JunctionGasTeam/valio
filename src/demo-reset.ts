@@ -1,35 +1,20 @@
-// Demo fixture (context.md §11.3): wipes proposals and the decision record, keeps the catalogue and the recorded offer
+// Demo fixture (context.md §11.3): wipes proposals, the decision record and registered accounts, keeps the catalogue and the recorded offer
 // cache, then adds two small milk orders approved unchanged "in earlier weeks", so the third approval, made live,
 // brings up the trust-ladder suggestion (§8.4). Demo data only: a real deployment never drops the audit table.
 import { openDb } from './db.ts';
-import { createApp, seed } from './api.ts';
+import { createApp, seed, seedHistory } from './api.ts';
 
 process.env.DEMO_NOW ??= '2026-11-14T12:00:00+0200';
 let db = openDb();
 seed(db);
-db.exec(`DROP TABLE audit; DROP TABLE proposals; UPDATE customers SET policy = NULL, agents_enabled = 1;
-         UPDATE tokens SET limits = NULL, revoked = 0;`);
+// Registered accounts go too (their kitchens, sessions, agent keys): only the demo kitchen is left.
+db.exec(`DROP TABLE audit; DROP TABLE proposals;
+         DELETE FROM users; DELETE FROM tokens WHERE customer != 'kaisla'; DELETE FROM customers WHERE id != 'kaisla';
+         UPDATE customers SET policy = NULL, agents_enabled = 1; UPDATE tokens SET limits = NULL, revoked = 0;`);
 db.close();
 db = openDb(); // recreates the empty tables and the append-only triggers
 const app = createApp(db);
-const call = async (token: string, path: string, body: unknown) => {
-  const res = await app.request(path, { method: 'POST', body: JSON.stringify(body), headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' } });
-  const j = (await res.json()) as any;
-  if (!res.ok) throw new Error(`${path}: ${res.status} ${j.error}`);
-  return j;
-};
-// Two, not three: the third approval happens live, so the trust banner appears from a click the audience just saw.
-for (const litres of [180, 200]) {
-  const p = await call('demo-agent', '/proposals', {
-    site: 'Hotel Kaisla Helsinki', deliver_by: '2026-11-16', items: [{ need: 'maito', quantity: litres, unit: 'l' }], diets: ['lactose_free'],
-    source_text: `${litres} l lactose-free milk by Monday`,
-  });
-  // The kitchen takes the sure-delivery option each week (the agent's own offer: not a fix, so trust still grows).
-  await app.request(`/proposals/${p.id}`, { method: 'PATCH', body: JSON.stringify({ item: 0, confirmed_only: true }), headers: { authorization: 'Bearer demo-owner', 'content-type': 'application/json' } });
-  await call('demo-owner', `/proposals/${p.id}/confirm`, {}); // "this is what I meant"
-  await call('demo-owner', `/proposals/${p.id}/decision`, { decision: 'approve', note: 'routine weekly order' });
-  const done = (await (await app.request(`/proposals/${p.id}`, { headers: { authorization: 'Bearer demo-owner' } })).json()) as any;
-  console.log(`history: ${litres} l, sure delivery ${done.items[0].allocation.map((l: any) => l.id).join('+')}, €${done.total_cents / 100}, approved`);
-}
+for (const p of await seedHistory(app, 'demo-owner', 'demo-agent'))
+  console.log(`history: ${p.request.items[0].quantity} l, sure delivery ${p.items[0].allocation.map((l: any) => l.id).join('+')}, €${p.total_cents / 100}, approved`);
 const trust = await (await app.request('/trust', { headers: { authorization: 'Bearer demo-owner' } })).json() as any;
 console.log('trust ladder:', trust.suggestion?.text ?? `streak ${trust.streak}, no suggestion`);
